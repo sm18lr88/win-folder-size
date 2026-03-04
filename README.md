@@ -62,7 +62,8 @@ Manual uninstall: `regsvr32 /u foldersize.dll`
 | Bounded LRU cache | ✗ | ✓ (50 MB, 5-min TTL) |
 | Loading mechanism | Windhawk service | `regsvr32` — standard COM |
 | Uninstallation | Requires Windhawk | `regsvr32 /u` |
-| Footprint | Windhawk service + mod | Single DLL, 144 KB |
+| Extension footprint | Windhawk mod | Single DLL, 144 KB |
+| Required runtime | Windhawk | Everything |
 
 ## Acknowledgements
 
