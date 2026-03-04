@@ -4,21 +4,7 @@
 
 Display folder sizes in Windows Explorer — Details view, Tiles, Content view, Details pane, and status bar — via a COM shell extension.
 
-## How It Works
-
-FolderSize is a COM shell extension DLL registered with `regsvr32`. It installs six hooks into Explorer via [Microsoft Detours](https://github.com/microsoft/detours):
-
-| Hook | Target | Purpose |
-|------|--------|---------|
-| `CFSFolder::_GetSize` | `windows.storage.dll` | Intercepts folder size queries; returns size from Everything |
-| `CRecursiveFolderOperation::Prepare/Do` | `windows.storage.dll` | RAII guard: suppresses size injection during copy/move/delete |
-| `PSFormatForDisplayAlloc` | `propsys.dll` | Human-readable formatting (B/KB/MB/GB/TB) instead of "1,572,864 KB" |
-| `PSFormatForDisplay` | `propsys.dll` | Same, for older Open/Save dialogs |
-| `RegQueryValueExW` | `kernelbase.dll` | Injects `System.Size` into Explorer's property format strings so sizes appear in Tiles, Content, Details-pane, and status-bar views |
-
-A background thread (`SHChangeNotifyRegister`) watches for filesystem changes and invalidates stale cache entries — including all ancestor directories — so sizes stay current after file operations.
-
-Folder sizes come from [Everything](https://www.voidtools.com/) via named pipe IPC (pre-indexed, ~3 ms/query). For non-NTFS drives, a fallback recursive scanner runs with a 200 ms timeout. If Everything isn't running, folders show blank — same as stock Explorer.
+Folder sizes come from [Everything](https://www.voidtools.com/)'s pre-built index, so queries are sub-millisecond and the Explorer UI thread is never blocked. The extension also keeps sizes fresh: a background thread watches for filesystem changes and invalidates cached entries automatically.
 
 **Installed = works. Uninstalled = `regsvr32 /u`. No toggles, no modes.**
 
@@ -62,32 +48,15 @@ scripts\status.bat         :: Check COM registration and Everything status
 
 Manual uninstall: `regsvr32 /u foldersize.dll`
 
-## Performance
-
-Microsoft's official position is that folder sizes in Explorer would hurt performance — which was true when they last evaluated it, because the only viable approach at the time was a recursive directory scan (blocking, O(files), disk I/O on the UI thread).
-
-Everything changes that. Sizes come from a pre-built in-memory index via named pipe IPC. Measured on a real session browsing `node_modules` directories with hundreds of packages:
-
-- **Average query latency: 0.6 ms** (78 queries measured)
-- **Worst case: 4 ms**
-- **77% of queries: sub-millisecond**
-- Queries run on a worker thread — the Explorer UI thread is never blocked
-
-Microsoft's concern is legitimate for a naive implementation. This isn't one.
-
-## Acknowledgements
-
-This project was inspired by m417z's excellent [Better file sizes in Explorer details](https://windhawk.net/mods/explorer-details-better-file-sizes) Windhawk mod, which pioneered the hook targets and approach used here. If you're already using Windhawk, that mod is a great option.
-
 ## Comparison with Windhawk "Better File Sizes"
 
 | Feature | Windhawk | FolderSize |
 |---------|----------|------------|
 | Folder sizes in Details view | ✓ | ✓ |
 | Folder sizes in Tiles / Content / Details-pane / Status bar | ✓ | ✓ |
-| Reparse point / junction / symlink resolution | partial | ✓ (`GetFinalPathNameByHandle`) |
+| Reparse point / junction / symlink resolution | partial | ✓ |
 | `PSFormatForDisplay` (legacy dialogs) | ✓ | ✓ |
-| Cache invalidation on filesystem changes | ✗ (stale forever) | ✓ (background thread, ancestor cascade) |
+| Cache invalidation on filesystem changes | ✗ | ✓ |
 | SEH protection on all hooks | ✗ | ✓ |
 | RAII recursive-op guard | ✗ | ✓ |
 | Bounded LRU cache | ✗ | ✓ (50 MB, 5-min TTL) |
@@ -95,20 +64,13 @@ This project was inspired by m417z's excellent [Better file sizes in Explorer de
 | Uninstallation | Requires Windhawk | `regsvr32 /u` |
 | Footprint | Windhawk service + mod | Single DLL, 144 KB |
 
-See [`docs/hook-targets.md`](docs/hook-targets.md) for the full technical analysis.
+## Acknowledgements
 
-## Architecture
+This project was inspired by m417z's excellent [Better file sizes in Explorer details](https://windhawk.net/mods/explorer-details-better-file-sizes) Windhawk mod, which pioneered the hook targets and approach used here. If you're already using Windhawk, that mod is a great option.
 
-```
-src/
-  com/          # COM class factory, DLL exports
-  core/         # Init, logging, size formatting, LRU cache, change notifier
-  hooks/        # Detours wrapper, hook manager, RegQueryValueExW hook
-  providers/    # Everything IPC client, fallback folder scanner
-include/        # Shared headers (logging, GUIDs, Everything IPC types)
-tests/          # GTest unit tests (formatter, cache)
-docs/           # Technical documentation
-```
+## Technical Details
+
+For how the hooks work, architecture, and performance benchmarks, see [`docs/technical-overview.md`](docs/technical-overview.md).
 
 ## License
 
