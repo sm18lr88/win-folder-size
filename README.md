@@ -2,6 +2,9 @@
 
 Display folder sizes in Windows Explorer's Size column via a lightweight COM shell extension.
 
+<img width="500" alt="image" src="https://github.com/user-attachments/assets/5ec3452d-a6f3-438b-9677-b3fbc451919f" />
+
+
 ## How It Works
 
 FolderSize is a COM shell extension DLL registered with `regsvr32`. It hooks Explorer's internal `CFSFolder::_GetSize` function (inside `windows.storage.dll`) using [Microsoft Detours](https://github.com/microsoft/detours). When Explorer requests a folder's size, the hook queries [Everything](https://www.voidtools.com/) via named pipe IPC and returns the result instantly.
