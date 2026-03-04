@@ -1,0 +1,55 @@
+name: CI
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build and Test
+    runs-on: windows-latest
+
+    env:
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        run: |
+          vcpkg integrate install
+        shell: cmd
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\packages
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-x64-windows-
+
+      - name: Configure CMake
+        run: |
+          cmake -B build ^
+            -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+        shell: cmd
+
+      - name: Build
+        run: cmake --build build --config Release
+        shell: cmd
+
+      - name: Build Tests
+        run: cmake --build build --config Release --target foldersize_tests
+        shell: cmd
+
+      - name: Run Tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+        shell: cmd

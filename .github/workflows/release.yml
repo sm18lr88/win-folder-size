@@ -1,0 +1,79 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build and Release
+    runs-on: windows-latest
+
+    env:
+      VCPKG_ROOT: C:\vcpkg
+      VCPKG_DEFAULT_TRIPLET: x64-windows
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up vcpkg
+        run: |
+          vcpkg integrate install
+        shell: cmd
+
+      - name: Cache vcpkg packages
+        uses: actions/cache@v4
+        with:
+          path: C:\vcpkg\packages
+          key: vcpkg-x64-windows-${{ hashFiles('vcpkg.json') }}
+          restore-keys: |
+            vcpkg-x64-windows-
+
+      - name: Configure CMake
+        run: |
+          cmake -B build ^
+            -DCMAKE_TOOLCHAIN_FILE="%VCPKG_ROOT%\scripts\buildsystems\vcpkg.cmake" ^
+            -DVCPKG_TARGET_TRIPLET=x64-windows
+        shell: cmd
+
+      - name: Build Release
+        run: cmake --build build --config Release
+        shell: cmd
+
+      - name: Build Tests
+        run: cmake --build build --config Release --target foldersize_tests
+        shell: cmd
+
+      - name: Run Tests
+        run: ctest --test-dir build --build-config Release --output-on-failure
+        shell: cmd
+
+      - name: Package release artifact
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $zipName = "foldersize-$tag-win64.zip"
+          $staging = "staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item "build\Release\foldersize.dll" $staging
+          Copy-Item "build\Release\foldersize.pdb" $staging
+          Copy-Item "scripts\install.bat" $staging
+          Copy-Item "scripts\uninstall.bat" $staging
+          Copy-Item "scripts\status.bat" $staging
+          Copy-Item "README.md" $staging
+          Copy-Item "LICENSE" $staging
+          Compress-Archive -Path "$staging\*" -DestinationPath $zipName -Force
+          Write-Output "RELEASE_ZIP=$zipName" >> $env:GITHUB_ENV
+          Write-Output "Packaged: $zipName"
+          Get-ChildItem $staging
+        shell: pwsh
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.RELEASE_ZIP }}
+          generate_release_notes: true
