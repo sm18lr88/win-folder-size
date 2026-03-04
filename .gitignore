@@ -1,0 +1,51 @@
+# Build output
+build/
+out/
+cmake-build-*/
+
+# vcpkg dependencies (restored by running vcpkg install)
+vcpkg_installed/
+
+# Visual Studio
+.vs/
+*.user
+*.suo
+*.vcxproj.user
+CMakeSettings.json
+
+# CMake (machine-specific, do not share)
+CMakePresets.json
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+
+# Compiled binaries and object files
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.pch
+
+# COM generated files
+*.tlb
+*.tlh
+*.tli
+
+# Windows OS files
+Thumbs.db
+Desktop.ini
+ehthumbs.db
+
+# Debug and test output
+*.log
+Testing/
+
+# AI planning/orchestration files (not part of project source)
+.sisyphus/
+
+# Accidental Windows device files
+nul
