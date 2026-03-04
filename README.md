@@ -32,7 +32,7 @@ Sizes are injected into Explorer's native property pipeline, so they sort, forma
 **Requirements**: Visual Studio 2022+, CMake 3.20+, vcpkg with `VCPKG_ROOT` set
 
 ```batch
-git clone https://github.com/YOUR_USERNAME/win-folder-size.git
+git clone https://github.com/sm18lr88/win-folder-size.git
 cd win-folder-size
 scripts\build.bat          :: Release build
 scripts\build.bat Debug    :: Debug build (verbose logging)
