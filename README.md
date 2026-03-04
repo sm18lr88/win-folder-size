@@ -1,25 +1,34 @@
 # FolderSize
 
-Display folder sizes in Windows Explorer's Size column via a lightweight COM shell extension.
-
 <img width="500" alt="image" src="https://github.com/user-attachments/assets/5ec3452d-a6f3-438b-9677-b3fbc451919f" />
 
+Display folder sizes in Windows Explorer — Details view, Tiles, Content view, Details pane, and status bar — via a COM shell extension.
 
 ## How It Works
 
-FolderSize is a COM shell extension DLL registered with `regsvr32`. It hooks Explorer's internal `CFSFolder::_GetSize` function (inside `windows.storage.dll`) using [Microsoft Detours](https://github.com/microsoft/detours). When Explorer requests a folder's size, the hook queries [Everything](https://www.voidtools.com/) via named pipe IPC and returns the result instantly.
+FolderSize is a COM shell extension DLL registered with `regsvr32`. It installs six hooks into Explorer via [Microsoft Detours](https://github.com/microsoft/detours):
 
-Sizes are injected into Explorer's native property pipeline, so they sort, format, and display exactly like file sizes. Formatting is human-readable (B, KB, MB, GB, TB) rather than Explorer's default "1,572,864 KB" style. RAII guard hooks prevent size injection during file operations (copy, move, delete) to avoid interfering with Explorer's own size calculations. If Everything isn't running, the extension fails silently and Explorer shows blank sizes, the same as stock behavior.
+| Hook | Target | Purpose |
+|------|--------|---------|
+| `CFSFolder::_GetSize` | `windows.storage.dll` | Intercepts folder size queries; returns size from Everything |
+| `CRecursiveFolderOperation::Prepare/Do` | `windows.storage.dll` | RAII guard: suppresses size injection during copy/move/delete |
+| `PSFormatForDisplayAlloc` | `propsys.dll` | Human-readable formatting (B/KB/MB/GB/TB) instead of "1,572,864 KB" |
+| `PSFormatForDisplay` | `propsys.dll` | Same, for older Open/Save dialogs |
+| `RegQueryValueExW` | `kernelbase.dll` | Injects `System.Size` into Explorer's property format strings so sizes appear in Tiles, Content, Details-pane, and status-bar views |
+
+A background thread (`SHChangeNotifyRegister`) watches for filesystem changes and invalidates stale cache entries — including all ancestor directories — so sizes stay current after file operations.
+
+Folder sizes come from [Everything](https://www.voidtools.com/) via named pipe IPC (pre-indexed, ~3 ms/query). For non-NTFS drives, a fallback recursive scanner runs with a 200 ms timeout. If Everything isn't running, folders show blank — same as stock Explorer.
+
+**Installed = works. Uninstalled = `regsvr32 /u`. No toggles, no modes.**
 
 ## Prerequisites
 
 **Runtime**
-
 - Windows 10/11 x64
-- [Everything](https://www.voidtools.com/) v1.4+ running with folder size indexing enabled
+- [Everything](https://www.voidtools.com/) 1.5a with folder-size indexing enabled
 
 **Build**
-
 - Visual Studio 2022+ (MSVC)
 - CMake 3.20+
 - vcpkg with `VCPKG_ROOT` set
@@ -28,11 +37,9 @@ Sizes are injected into Explorer's native property pipeline, so they sort, forma
 
 1. Download `foldersize-vX.X.X-win64.zip` from [Releases](../../releases)
 2. Extract and run `install.bat` **as Administrator**
-3. Folder sizes appear in Explorer's Size column immediately
+3. Folder sizes appear immediately
 
 ## Building from Source
-
-**Requirements**: Visual Studio 2022+, CMake 3.20+, vcpkg with `VCPKG_ROOT` set
 
 ```batch
 git clone https://github.com/sm18lr88/win-folder-size.git
@@ -41,41 +48,34 @@ scripts\build.bat          :: Release build
 scripts\build.bat Debug    :: Debug build (verbose logging)
 ```
 
-Output: `build\Release\foldersize.dll`
+Output: `build\foldersize.dll`
 
-## Install / Uninstall / Status
+## Install / Uninstall
 
 All scripts require **Administrator** privileges.
 
 ```batch
-scripts\install.bat        :: Registers DLL via regsvr32, restarts Explorer
-scripts\uninstall.bat      :: Unregisters via regsvr32 /u, restarts Explorer
-scripts\status.bat         :: Checks COM registration, DLL loaded in Explorer, Everything running
+scripts\install.bat        :: Register DLL + restart Explorer
+scripts\uninstall.bat      :: Unregister + restart Explorer
+scripts\status.bat         :: Check COM registration and Everything status
 ```
 
-To uninstall manually without the script:
+Manual uninstall: `regsvr32 /u foldersize.dll`
 
-```batch
-regsvr32 /u foldersize.dll
-```
+## Comparison with Windhawk "Better File Sizes"
 
-## Comparison with Windhawk
-
-There's a [Windhawk mod](https://windhawk.net/) that does something similar. Here's how this project differs:
-
-| Aspect | Windhawk mod | FolderSize (this project) |
-|--------|--------------|---------------------------|
-| Guard mechanism | `thread_local bool` (no RAII, can leak on exception) | RAII `RecursiveOpGuard` (exception-safe, depth-counter) |
-| Cache | Ad-hoc `std::map` with tick-based expiry | Thread-safe LRU cache with TTL, bounded memory (50MB) |
-| Error handling | `Wh_Log` only | Multi-output logging (DebugView + file) with source location |
-| Hook framework | Windhawk API (proprietary DLL injection) | Microsoft Detours (officially supported) |
-| Loading mechanism | Windhawk service (flagged as virus by some AV) | Standard COM registration (`regsvr32`) — no third-party service |
-| Uninstallation | Requires Windhawk uninstall | `regsvr32 /u foldersize.dll` — one command |
-| SEH protection | None — hooks can crash Explorer | Every hook wrapped in `__try/__except` |
-| Global state | Many globals (`g_settings`, `g_cache*`) | Meyers singletons (thread-safe by C++11 standard) |
-| Process exclusion | Manual exclude list | Only loads into Explorer (COM registration is Explorer-specific) |
-| Compatibility | Requires Windhawk framework installed | Pure Windows API, no third-party dependencies at runtime |
-| Footprint | Windhawk service + mod | Single DLL (~1.5 MB) |
+| Feature | Windhawk | FolderSize |
+|---------|----------|------------|
+| Folder sizes in Details view | ✓ | ✓ |
+| Folder sizes in Tiles / Content / Details-pane / Status bar | ✓ | ✓ |
+| Reparse point / junction / symlink resolution | partial | ✓ (`GetFinalPathNameByHandle`) |
+| `PSFormatForDisplay` (legacy dialogs) | ✓ | ✓ |
+| Cache invalidation on filesystem changes | ✗ (stale forever) | ✓ (background thread, ancestor cascade) |
+| SEH protection on all hooks | ✗ | ✓ |
+| RAII recursive-op guard | ✗ | ✓ |
+| Bounded LRU cache | ✗ | ✓ (50 MB, 5-min TTL) |
+| Loading mechanism | Windhawk service (flagged by some AV) | `regsvr32` — standard COM |
+| Uninstallation | Requires Windhawk | `regsvr32 /u` |
 
 See [`docs/hook-targets.md`](docs/hook-targets.md) for the full technical analysis.
 
@@ -83,14 +83,12 @@ See [`docs/hook-targets.md`](docs/hook-targets.md) for the full technical analys
 
 ```
 src/
-  com/          # COM class factory, DLL exports, shell overlay stub
-  core/         # Logging, size formatting, LRU cache, initialization
-  hooks/        # Detours wrapper, hook manager (installs/removes hooks)
+  com/          # COM class factory, DLL exports
+  core/         # Init, logging, size formatting, LRU cache, change notifier
+  hooks/        # Detours wrapper, hook manager, RegQueryValueExW hook
   providers/    # Everything IPC client, fallback folder scanner
-include/        # Public headers (logging, GUIDs, Everything IPC types)
-def/            # DLL export definitions
-scripts/        # Build, install, uninstall, status scripts
-tests/          # GTest unit tests (size formatter, LRU cache)
+include/        # Shared headers (logging, GUIDs, Everything IPC types)
+tests/          # GTest unit tests (formatter, cache)
 docs/           # Technical documentation
 ```
 

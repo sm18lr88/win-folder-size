@@ -4,7 +4,7 @@
 
 Explorer's Size column is populated by internal functions in `windows.storage.dll`, resolved via PDB symbol names at runtime. For folders, the primary function returns `VT_EMPTY` (blank). We intercept this and inject the folder size from Everything.
 
-**Total hooks needed: 4 (2 required, 2 recommended)**
+**Total hooks: 6 (3 required, 3 recommended)**
 
 ---
 
@@ -162,7 +162,66 @@ DEFINE_PROPERTYKEY(PKEY_Size, 0xB725F130, 0x47EF, 0x101A, 0xA5, 0xF1, 0x02, 0x60
 
 ---
 
-## Hook 4: `CFSFolder::CompareIDs` (OPTIONAL — Sort Mixing)
+## Hook 4: `RegQueryValueExW` (RECOMMENDED — Extended View Support)
+
+**Module**: `kernelbase.dll`
+**Resolution**: Exported function (GetProcAddress)
+
+### Behavior
+Explorer reads shell property format strings from `HKCR\Folder` and `HKCR\Directory`
+to decide which properties to display in Tiles, Content, Details-pane, and Status-bar
+views.  By default these strings omit `System.Size` for folders.
+
+Our hook intercepts reads of five specific values and injects `System.Size`:
+
+| Value Name | Key | Injection |
+|---|---|---|
+| `TileInfo` | `HKCR\Folder` | append `;System.Size` |
+| `ContentViewModeForBrowse` | `HKCR\Folder` | append `;System.Size` |
+| `ContentViewModeForSearch` | `HKCR\Folder` | append `;System.Size` |
+| `PreviewDetails` | `HKCR\Directory` | insert `;System.Size` after `DateModified` |
+| `StatusBar` | `HKCR\Directory` | insert `~System.Size;` as 2nd item |
+
+Key identity is verified via `NtQueryKey(KeyNameInformation)` — only the HKCR
+classes hive (`\REGISTRY\MACHINE\SOFTWARE\Classes\` or
+`\REGISTRY\USER\..._Classes\`) is intercepted.
+
+Combined with the existing `_GetSize` hook that provides the folder size value,
+this enables folder sizes in all Explorer view modes.
+
+---
+
+## Hook 5: `PSFormatForDisplay` (RECOMMENDED — Legacy Dialog Support)
+
+**Module**: `propsys.dll`
+**Resolution**: Exported function (GetProcAddress)
+
+Buffer-writing variant of `PSFormatForDisplayAlloc`.  Used by older shell
+dialogs (legacy Open/Save dialogs, regedit export).  Identical logic to
+Hook 3 but writes into the caller's `LPWSTR pwszText` buffer instead of
+allocating a new string.
+
+---
+
+## Hook 6: Shell Change Notification — Cache Invalidation (UNIQUE)
+
+**Not a Detours hook** — runs as a background thread with a hidden
+message-only window registered via `SHChangeNotifyRegister`.
+
+Monitors `SHCNE_UPDATEDIR | SHCNE_RMDIR | SHCNE_MKDIR | SHCNE_CREATE |
+SHCNE_DELETE | SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER` events for the
+entire shell namespace (desktop root, recursive).
+
+On each event: the affected path **and all ancestor directories** are
+invalidated from `SizeCache`, so re-navigating a parent folder shows
+fresh sizes immediately.
+
+**Windhawk has no cache invalidation** — sizes stay stale until the
+5-minute TTL expires.
+
+---
+
+## Hook 7: `CFSFolder::CompareIDs` (OPTIONAL — Sort Mixing)
 
 **Module**: `windows.storage.dll`  
 **Resolution**: PDB symbol
@@ -243,7 +302,11 @@ All hooks are installed via Microsoft Detours, which:
 | Hook framework | Windhawk API (DLL injection) | COM shell extension + Microsoft Detours (fully reversible) |
 | Loading mechanism | Windhawk service (detected as virus) | Standard COM registration (`regsvr32`) — no third-party service |
 | Uninstallation | Requires Windhawk uninstall | `regsvr32 /u foldersize.dll` — one command |
-| Reparse/OneDrive | Known bugs (#1527) | Delegate to Everything's handling, fail-silent on edge cases |
+| Reparse/OneDrive | Known bugs (#1527) | resolve_real_path via GetFinalPathNameByHandle; query Everything with canonical path |
+| Tiles / Content view sizes | ✓ (RegQueryValueEx hook) | ✓ (RegQueryValueExW hook, kernelbase.dll) |
+| Details-pane / Status-bar sizes | ✓ | ✓ (PreviewDetails + StatusBar injection) |
+| PSFormatForDisplay (legacy) | ✓ | ✓ (PSFormatForDisplay + PSFormatForDisplayAlloc both hooked) |
+| Cache invalidation on FS changes | ✗ — stale forever | ✓ SHChangeNotifyRegister thread, ancestor cascade |
 | Process exclusion | Manual exclude list | Only loads into Explorer (COM registration is Explorer-specific) |
 
 ---

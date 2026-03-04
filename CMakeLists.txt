@@ -27,6 +27,8 @@ set(SOURCES
     src/com/com_exports.cpp
     src/hooks/detour_wrapper.cpp
     src/hooks/hook_manager.cpp
+    src/hooks/reg_query_hook.cpp
+    src/core/change_notifier.cpp
     src/providers/everything_client.cpp
     src/providers/folder_scanner.cpp
 )

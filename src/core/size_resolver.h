@@ -43,6 +43,10 @@ private:
     // Resolve folder size: cache → Everything (NTFS) → scanner (non-NTFS)
     std::optional<uint64_t> resolve_size(const std::wstring& path);
 
+    // Follow reparse points / junctions / symlinks to get the canonical path.
+    // Returns nullopt if not a reparse point, resolution fails, or path unchanged.
+    std::optional<std::wstring> resolve_real_path(const std::wstring& path);
+
     // Everything availability backoff
     bool should_try_everything();
     void mark_everything_unavailable();

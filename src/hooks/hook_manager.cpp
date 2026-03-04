@@ -12,8 +12,10 @@
 
 #include "hooks/hook_manager.h"
 #include "hooks/detour_wrapper.h"
+#include "hooks/reg_query_hook.h"
 #include "logging.h"
 #include "core/init.h"
+#include "core/size_formatter.h"
 #include "core/size_resolver.h"
 
 // ============================================================================
@@ -223,6 +225,47 @@ static HRESULT WINAPI hooked_PSFormat(REFPROPERTYKEY key, REFPROPVARIANT propvar
     }
 }
 
+// PSFormatForDisplay hook (non-Alloc variant, from propsys.dll)
+// Used by older shell dialogs (Open/Save in legacy apps, regedit export).
+// Identical logic to PSFormatForDisplayAlloc but writes into a caller buffer.
+using PSFormatForDisplay_t = HRESULT(WINAPI*)(REFPROPERTYKEY, REFPROPVARIANT,
+                                               PROPDESC_FORMAT_FLAGS, LPWSTR, DWORD);
+static PSFormatForDisplay_t s_original_PSFormatNonAlloc = nullptr;
+
+static HRESULT hooked_PSFormatNonAlloc_inner(REFPROPERTYKEY key, REFPROPVARIANT propvar,
+                                              PROPDESC_FORMAT_FLAGS pdff,
+                                              LPWSTR pwszText, DWORD cchText) {
+    try {
+        if (!fs::core::is_initialized() || cchText == 0) {
+            return s_original_PSFormatNonAlloc(key, propvar, pdff, pwszText, cchText);
+        }
+        if (!IsEqualPropertyKey(key, PKEY_Size) || propvar.vt != VT_UI8) {
+            return s_original_PSFormatNonAlloc(key, propvar, pdff, pwszText, cchText);
+        }
+
+        uint64_t bytes = propvar.uhVal.QuadPart;
+        std::wstring formatted = fs::format_size_for_column(bytes);
+
+        // Copy into caller-supplied buffer; _TRUNCATE ensures null termination
+        wcsncpy_s(pwszText, cchText, formatted.c_str(), _TRUNCATE);
+        return S_OK;
+    } catch (...) {
+        FS_ERROR(FS_MOD_HOOK, "C++ exception in hooked_PSFormatNonAlloc");
+        return s_original_PSFormatNonAlloc(key, propvar, pdff, pwszText, cchText);
+    }
+}
+
+static HRESULT WINAPI hooked_PSFormatNonAlloc(REFPROPERTYKEY key, REFPROPVARIANT propvar,
+                                               PROPDESC_FORMAT_FLAGS pdff,
+                                               LPWSTR pwszText, DWORD cchText) {
+    __try {
+        return hooked_PSFormatNonAlloc_inner(key, propvar, pdff, pwszText, cchText);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        FS_ERROR(FS_MOD_HOOK, "SEH exception in hooked_PSFormatNonAlloc");
+        return s_original_PSFormatNonAlloc(key, propvar, pdff, pwszText, cchText);
+    }
+}
+
 // ============================================================================
 // Symbol Resolution Helper
 // ============================================================================
@@ -407,11 +450,20 @@ bool HookManager::install_hooks() {
             return;
         }
 
+        PSFormatForDisplay_t pPSFormatNonAlloc =
+            (PSFormatForDisplay_t)GetProcAddress(propsys_dll, "PSFormatForDisplay");
+        // Non-alloc variant is optional — older propsys versions may lack it
+        if (!pPSFormatNonAlloc) {
+            fs::log::diagnostic_logf("PSFormatForDisplay not found (err=0x%lx), skipping",
+                                     GetLastError());
+        }
+
         // Set up original function pointers from resolved addresses
         s_original_GetSize = (CFSFolder_GetSize_t)addr_GetSize;
         s_original_Prepare = (RecursiveOp_Prepare_t)addr_Prepare;
         s_original_Do = (RecursiveOp_Do_t)addr_Do;
         s_original_PSFormat = pPSFormat;
+        s_original_PSFormatNonAlloc = pPSFormatNonAlloc;
 
         // Begin Detours transaction
         DetourTransaction txn;
@@ -427,6 +479,14 @@ bool HookManager::install_hooks() {
         attach_ok &= (DetourAttach(&(PVOID&)s_original_Prepare, hooked_Prepare) == NO_ERROR);
         attach_ok &= (DetourAttach(&(PVOID&)s_original_Do, hooked_Do) == NO_ERROR);
         attach_ok &= (DetourAttach(&(PVOID&)s_original_PSFormat, hooked_PSFormat) == NO_ERROR);
+        if (s_original_PSFormatNonAlloc) {
+            attach_ok &= (DetourAttach(&(PVOID&)s_original_PSFormatNonAlloc,
+                                       hooked_PSFormatNonAlloc) == NO_ERROR);
+        }
+
+        // Install RegQueryValueExW hook (kernelbase.dll — extends Tiles/Content/
+        // Details-pane/Status-bar support) within the same transaction.
+        install_reg_query_hook();
 
         if (!attach_ok) {
             FS_ERROR(FS_MOD_HOOK, "One or more DetourAttach calls failed");
@@ -509,6 +569,18 @@ void HookManager::remove_hooks() {
             FS_DEBUG(FS_MOD_HOOK, "Detached hook for PSFormatForDisplayAlloc");
         }
     }
+
+    if (s_original_PSFormatNonAlloc) {
+        if (DetourDetach(&(PVOID&)s_original_PSFormatNonAlloc,
+                         hooked_PSFormatNonAlloc) != NO_ERROR) {
+            FS_ERROR(FS_MOD_HOOK, "DetourDetach failed for PSFormatNonAlloc");
+            detach_ok = false;
+        } else {
+            FS_DEBUG(FS_MOD_HOOK, "Detached hook for PSFormatForDisplay");
+        }
+    }
+
+    remove_reg_query_hook();
 
     if (!detach_ok) {
         FS_ERROR(FS_MOD_HOOK, "One or more hook detachments failed, aborting transaction");

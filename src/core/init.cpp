@@ -1,4 +1,5 @@
 #include "core/init.h"
+#include "core/change_notifier.h"
 #include "logging.h"
 #include "hooks/hook_manager.h"
 #include "core/size_cache.h"
@@ -28,6 +29,8 @@ static void background_init() {
         fs::log::diagnostic_log("Hooks installed successfully");
         s_initialized.store(true);
         FS_INFO(FS_MOD_INIT, "Hooks installed successfully — folder sizes active");
+        // Start background cache invalidation via shell change notifications
+        fs::core::ChangeNotifier::instance().start();
     } else {
         fs::log::diagnostic_log("Hook installation FAILED");
         FS_WARN(FS_MOD_INIT, "Hook installation failed — running in pass-through mode");
@@ -46,6 +49,8 @@ void shutdown_foldersize() {
     s_shutdownRequested.store(true);
 
     if (s_initialized.load()) {
+        // Stop change notification thread before removing hooks
+        fs::core::ChangeNotifier::instance().stop();
         // Remove hooks
         fs::hooks::HookManager::instance().remove_hooks();
         s_initialized.store(false);

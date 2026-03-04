@@ -132,7 +132,42 @@ void SizeResolver::mark_everything_unavailable() {
 }
 
 // ============================================================================
+// Reparse Point Resolution — junctions, symlinks, OneDrive placeholders
+// ============================================================================
+
+std::optional<std::wstring> SizeResolver::resolve_real_path(const std::wstring& path) {
+    // Open the directory without following reparse points (backup semantics
+    // lets us open directories; FILE_FLAG_BACKUP_SEMANTICS is required).
+    HANDLE hFile = CreateFileW(
+        path.c_str(),
+        FILE_READ_EA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS, // required for directories
+        nullptr);
+
+    if (hFile == INVALID_HANDLE_VALUE) return std::nullopt;
+
+    wchar_t resolved[32768] = {};
+    DWORD result = GetFinalPathNameByHandleW(
+        hFile, resolved, static_cast<DWORD>(std::size(resolved)),
+        FILE_NAME_NORMALIZED);
+    CloseHandle(hFile);
+
+    if (result == 0 || result >= std::size(resolved)) return std::nullopt;
+
+    std::wstring canonical(resolved);
+    // Strip the \\?\ extended-path prefix added by GetFinalPathNameByHandle
+    if (canonical.starts_with(L"\\\\?\\")) canonical = canonical.substr(4);
+
+    return canonical;
+}
+
+// ============================================================================
 // Size Resolution Pipeline: Cache → Everything (NTFS) → Scanner (non-NTFS)
+// Reparse points are resolved before querying Everything so that junctions
+// and symlinks map to a path that Everything has indexed.
 // ============================================================================
 
 std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path) {
@@ -146,29 +181,46 @@ std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path) {
         return cached;
     }
 
-    // 2. Determine drive filesystem type
+    // 2. If the path is a reparse point (junction / symlink), resolve it so
+    //    Everything can find the real directory.  Skip UNC paths — resolution
+    //    can be slow for unmapped network shares.
+    std::wstring effectivePath = path;
+    if (!path.starts_with(L"\\\\")) {
+        WIN32_FILE_ATTRIBUTE_DATA fad = {};
+        if (GetFileAttributesEx(path.c_str(), GetFileExInfoStandard, &fad) &&
+            (fad.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+            auto resolved = resolve_real_path(path);
+            if (resolved && *resolved != path) {
+                FS_TRACE(FS_MOD_RESOLVER, "Reparse: %ls -> %ls",
+                         path.c_str(), resolved->c_str());
+                effectivePath = std::move(*resolved);
+            }
+        }
+    }
+
+    // 3. Determine drive filesystem type (use effectivePath's drive)
     wchar_t driveLetter = L'\0';
-    if (path.length() >= 2 && path[1] == L':') {
-        driveLetter = towupper(path[0]);
+    if (effectivePath.length() >= 2 && effectivePath[1] == L':') {
+        driveLetter = towupper(effectivePath[0]);
     }
 
     if (driveLetter == L'\0') {
-        FS_TRACE(FS_MOD_RESOLVER, "No drive letter in path: %ls", path.c_str());
+        FS_TRACE(FS_MOD_RESOLVER, "No drive letter in path: %ls", effectivePath.c_str());
         return std::nullopt; // UNC paths, etc. — not supported
     }
 
     bool ntfs = fs::providers::FolderScanner::is_ntfs(driveLetter);
 
     if (ntfs) {
-        // 3a. NTFS → Everything (pre-indexed, ~3ms per query)
+        // 4a. NTFS → Everything (pre-indexed, ~3ms per query)
         if (!should_try_everything()) {
             FS_TRACE(FS_MOD_RESOLVER, "Everything in backoff, skipping: %ls", path.c_str());
             return std::nullopt;
         }
 
-        auto size = fs::EverythingClient::instance().get_folder_size(path);
+        auto size = fs::EverythingClient::instance().get_folder_size(effectivePath);
         if (size.has_value()) {
-            fs::SizeCache::instance().put(path, size.value());
+            fs::SizeCache::instance().put(path, size.value()); // cache under original path
             FS_TRACE(FS_MOD_RESOLVER, "Everything: %ls = %llu bytes", path.c_str(),
                      size.value());
             return size;
@@ -178,9 +230,9 @@ std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path) {
         mark_everything_unavailable();
         return std::nullopt;
     } else {
-        // 3b. Non-NTFS → recursive scanner (200ms timeout)
+        // 4b. Non-NTFS → recursive scanner (200ms timeout)
         auto size = fs::providers::FolderScanner::instance().scan_sync(
-            path, std::chrono::milliseconds(200));
+            effectivePath, std::chrono::milliseconds(200));
         if (size.has_value()) {
             fs::SizeCache::instance().put(path, size.value());
             FS_TRACE(FS_MOD_RESOLVER, "Scanner: %ls = %llu bytes", path.c_str(),
