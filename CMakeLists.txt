@@ -4,10 +4,11 @@ project(foldersize LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# Find Detours - set paths directly
-set(DETOURS_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/vcpkg_installed/x64-windows/include")
-set(DETOURS_LIBRARY "${CMAKE_SOURCE_DIR}/vcpkg_installed/x64-windows/lib/detours.lib")
+# Find Detours via vcpkg
+# Works with both the vcpkg toolchain file (CI) and local vcpkg_installed/
 list(APPEND CMAKE_PREFIX_PATH "${CMAKE_SOURCE_DIR}/vcpkg_installed/x64-windows")
+find_path(DETOURS_INCLUDE_DIRS NAMES detours/detours.h REQUIRED)
+find_library(DETOURS_LIBRARY NAMES detours REQUIRED)
 
 # Use dynamic CRT (/MD) to match vcpkg x64-windows triplet
 # Static CRT (/MT) causes heap corruption when mixing with vcpkg-built libs
