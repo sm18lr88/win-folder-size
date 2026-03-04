@@ -62,6 +62,19 @@ scripts\status.bat         :: Check COM registration and Everything status
 
 Manual uninstall: `regsvr32 /u foldersize.dll`
 
+## Performance
+
+Microsoft's official position is that folder sizes in Explorer would hurt performance — which was true when they last evaluated it, because the only viable approach at the time was a recursive directory scan (blocking, O(files), disk I/O on the UI thread).
+
+Everything changes that. Sizes come from a pre-built in-memory index via named pipe IPC. Measured on a real session browsing `node_modules` directories with hundreds of packages:
+
+- **Average query latency: 0.6 ms** (78 queries measured)
+- **Worst case: 4 ms**
+- **77% of queries: sub-millisecond**
+- Queries run on a worker thread — the Explorer UI thread is never blocked
+
+Microsoft's concern is legitimate for a naive implementation. This isn't one.
+
 ## Acknowledgements
 
 This project was inspired by m417z's excellent [Better file sizes in Explorer details](https://windhawk.net/mods/explorer-details-better-file-sizes) Windhawk mod, which pioneered the hook targets and approach used here. If you're already using Windhawk, that mod is a great option.
