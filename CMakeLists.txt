@@ -66,14 +66,14 @@ if(MSVC)
         $<$<CONFIG:Release>:FS_LOG_LEVEL=3>
     )
     
-    # Release optimizations
+    # Release optimizations with debug info (PDB for crash debugging)
     target_compile_options(foldersize PRIVATE
-        $<$<CONFIG:Release>:/O2 /GL>
+        $<$<CONFIG:Release>:/O2 /GL /Zi>
     )
     
-    # Release: Link-time code generation
+    # Release: Link-time code generation + PDB generation
     target_link_options(foldersize PRIVATE
-        $<$<CONFIG:Release>:/LTCG>
+        $<$<CONFIG:Release>:/LTCG /DEBUG /OPT:REF /OPT:ICF>
     )
 endif()
 
