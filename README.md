@@ -62,6 +62,10 @@ scripts\status.bat         :: Check COM registration and Everything status
 
 Manual uninstall: `regsvr32 /u foldersize.dll`
 
+## Acknowledgements
+
+This project was inspired by m417z's excellent [Better file sizes in Explorer details](https://windhawk.net/mods/explorer-details-better-file-sizes) Windhawk mod, which pioneered the hook targets and approach used here. If you're already using Windhawk, that mod is a great option.
+
 ## Comparison with Windhawk "Better File Sizes"
 
 | Feature | Windhawk | FolderSize |
