@@ -74,7 +74,7 @@ Manual uninstall: `regsvr32 /u foldersize.dll`
 | SEH protection on all hooks | ✗ | ✓ |
 | RAII recursive-op guard | ✗ | ✓ |
 | Bounded LRU cache | ✗ | ✓ (50 MB, 5-min TTL) |
-| Loading mechanism | Windhawk service (flagged by some AV) | `regsvr32` — standard COM |
+| Loading mechanism | Windhawk service | `regsvr32` — standard COM |
 | Uninstallation | Requires Windhawk | `regsvr32 /u` |
 | Footprint | Windhawk service + mod | Single DLL, 144 KB |
 

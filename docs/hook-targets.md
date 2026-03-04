@@ -84,16 +84,8 @@ When Explorer performs file operations (copy, move, delete), it internally calls
 - This would give **incorrect** results (Everything's index may not match actual files being operated on).
 - It would **slow down** file operations with unnecessary IPC calls to Everything.
 
-### Hook Strategy — Improvement Over Windhawk
+### Hook Strategy
 
-**Windhawk's approach (BUGGY)**:
-```cpp
-// BAD: bare thread_local booleans, no RAII, can leak on exception
-thread_local bool g_inCRecursiveFolderOperation_Prepare;
-// Manually set true/false around original call
-```
-
-**Our approach (IMPROVED)**:
 ```cpp
 // RAII scoped guard with thread_local depth counter
 class RecursiveOpGuard {
@@ -117,9 +109,9 @@ HRESULT CRecursiveFolderOperation_Prepare_Hook(void* pThis) {
 if (RecursiveOpGuard::active()) return original_result;  // skip our logic
 ```
 
-**Improvements over Windhawk**:
+Properties of this design:
 1. **RAII**: Guard is exception-safe — counter always decremented even on exception/longjmp.
-2. **Nesting support**: Depth counter instead of boolean handles nested recursive operations.
+2. **Nesting support**: Depth counter handles nested recursive operations correctly.
 3. **No manual set/clear**: Impossible to forget the clear or have mismatched set/clear.
 
 ---
@@ -216,8 +208,8 @@ On each event: the affected path **and all ancestor directories** are
 invalidated from `SizeCache`, so re-navigating a parent folder shows
 fresh sizes immediately.
 
-**Windhawk has no cache invalidation** — sizes stay stale until the
-5-minute TTL expires.
+Without this thread, cached sizes are not invalidated on filesystem changes
+and stay stale until the TTL expires.
 
 ---
 
@@ -289,25 +281,21 @@ All hooks are installed via Microsoft Detours, which:
 
 ---
 
-## Comparison with Windhawk — Our Improvements
+## Comparison with Windhawk
 
-| Aspect | Windhawk | Ours |
-|--------|----------|------|
-| Guard mechanism | `thread_local bool` (no RAII) | RAII `RecursiveOpGuard` scoped class |
-| Global state | Many globals (`g_settings`, `g_cache*`, `g_gs*`) | Meyers singletons (SizeCache, EverythingClient, HookManager) |
-| SEH protection | None — hooks can crash Explorer | Every hook callback wrapped in `__try/__except` |
-| Error handling | `Wh_Log` only | Multi-output logging (OutputDebugString + file) with source location |
-| Everything client | Embedded SDK3 source (~800 lines) | Clean C++ client class with RAII (EverythingClient singleton) |
-| Cache | Ad-hoc `std::map` with tick-based expiry | Thread-safe LRU cache with TTL, bounded memory (50MB) |
-| Hook framework | Windhawk API (DLL injection) | COM shell extension + Microsoft Detours (fully reversible) |
-| Loading mechanism | Windhawk service (detected as virus) | Standard COM registration (`regsvr32`) — no third-party service |
-| Uninstallation | Requires Windhawk uninstall | `regsvr32 /u foldersize.dll` — one command |
-| Reparse/OneDrive | Known bugs (#1527) | resolve_real_path via GetFinalPathNameByHandle; query Everything with canonical path |
-| Tiles / Content view sizes | ✓ (RegQueryValueEx hook) | ✓ (RegQueryValueExW hook, kernelbase.dll) |
-| Details-pane / Status-bar sizes | ✓ | ✓ (PreviewDetails + StatusBar injection) |
-| PSFormatForDisplay (legacy) | ✓ | ✓ (PSFormatForDisplay + PSFormatForDisplayAlloc both hooked) |
-| Cache invalidation on FS changes | ✗ — stale forever | ✓ SHChangeNotifyRegister thread, ancestor cascade |
-| Process exclusion | Manual exclude list | Only loads into Explorer (COM registration is Explorer-specific) |
+| Aspect | Windhawk mod | FolderSize |
+|--------|-------------|------------|
+| Guard mechanism | `thread_local bool` | RAII `RecursiveOpGuard` scoped class |
+| SEH protection | No per-hook SEH | Every hook callback wrapped in `__try/__except` |
+| Cache | `std::map` with tick-based expiry | Thread-safe LRU, bounded memory (50 MB), 5-min TTL |
+| Hook framework | Windhawk API | COM shell extension + Microsoft Detours |
+| Loading mechanism | Windhawk service | Standard COM registration (`regsvr32`) |
+| Uninstallation | Requires Windhawk | `regsvr32 /u foldersize.dll` |
+| Reparse point resolution | Partial | `GetFinalPathNameByHandleW` → canonical path |
+| Tiles / Content view sizes | ✓ | ✓ |
+| Details-pane / Status-bar sizes | ✓ | ✓ |
+| PSFormatForDisplay (legacy dialogs) | ✓ | ✓ |
+| Cache invalidation on FS changes | TTL expiry only | SHChangeNotifyRegister thread, ancestor cascade |
 
 ---
 
