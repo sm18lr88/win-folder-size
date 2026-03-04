@@ -1,12 +1,9 @@
 # FolderSize
 
+Display folder sizes in Windows Explorer.
+
 <img width="500" alt="image" src="https://github.com/user-attachments/assets/5ec3452d-a6f3-438b-9677-b3fbc451919f" />
 
-Display folder sizes in Windows Explorer — Details view, Tiles, Content view, Details pane, and status bar — via a COM shell extension.
-
-Folder sizes come from [Everything](https://www.voidtools.com/)'s pre-built index, so queries are sub-millisecond and the Explorer UI thread is never blocked. The extension also keeps sizes fresh: a background thread watches for filesystem changes and invalidates cached entries automatically.
-
-**Installed = works. Uninstalled = `regsvr32 /u`. No toggles, no modes.**
 
 ## Prerequisites
 
@@ -63,7 +60,7 @@ Manual uninstall: `regsvr32 /u foldersize.dll`
 | Loading mechanism | Windhawk service | `regsvr32` — standard COM |
 | Uninstallation | Requires Windhawk | `regsvr32 /u` |
 | Extension footprint | Windhawk mod | Single DLL, 144 KB |
-| Required runtime | Windhawk | Everything |
+| Required runtime | Windhawk | [Everything](https://www.voidtools.com/) |
 
 ## Acknowledgements
 
