@@ -13,6 +13,7 @@
 #include <propvarutil.h>
 #include <objbase.h>
 #include <atomic>
+#include <cwctype>
 
 namespace fs::core {
 
@@ -23,6 +24,18 @@ namespace fs::core {
 SizeResolver& SizeResolver::instance() {
     static SizeResolver s_instance;
     return s_instance;
+}
+
+SizeResolver::~SizeResolver() {
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+        m_stopWorker = true;
+    }
+    m_queueCv.notify_all();
+
+    if (m_worker.joinable()) {
+        m_worker.join();
+    }
 }
 
 // ============================================================================
@@ -100,6 +113,115 @@ std::optional<std::wstring> SizeResolver::extract_path(void* pCFSFolder,
 
     FS_TRACE(FS_MOD_RESOLVER, "Extracted path: %ls", path.c_str());
     return path;
+}
+
+std::wstring SizeResolver::normalize_request_path(std::wstring_view path) {
+    std::wstring normalized(path);
+
+    for (auto& ch : normalized) {
+        if (ch == L'/') {
+            ch = L'\\';
+        } else {
+            ch = static_cast<wchar_t>(towlower(ch));
+        }
+    }
+
+    if (normalized.length() > 3 && normalized.back() == L'\\') {
+        normalized.pop_back();
+    }
+
+    return normalized;
+}
+
+std::optional<uint64_t> SizeResolver::get_cached_size(const std::wstring& path) {
+    return fs::SizeCache::instance().get(path);
+}
+
+void SizeResolver::ensure_worker_started() {
+    if (m_worker.joinable()) {
+        return;
+    }
+
+    m_stopWorker = false;
+    m_worker = std::thread([this]() { worker_main(); });
+}
+
+bool SizeResolver::queue_background_resolution(const std::wstring& path) {
+    const std::wstring normalized = normalize_request_path(path);
+    if (normalized.empty()) {
+        return false;
+    }
+
+    std::lock_guard<std::mutex> lock(m_queueMutex);
+    ensure_worker_started();
+
+    auto now = std::chrono::steady_clock::now();
+    auto failureIt = m_recentFailures.find(normalized);
+    if (failureIt != m_recentFailures.end()) {
+        if (now - failureIt->second < FAILURE_RETRY_INTERVAL) {
+            FS_TRACE(FS_MOD_RESOLVER, "Failure cooldown active for %ls", normalized.c_str());
+            return false;
+        }
+        m_recentFailures.erase(failureIt);
+    }
+
+    if (m_inFlight.contains(normalized)) {
+        return true;
+    }
+
+    if (m_queue.size() >= MAX_PENDING_REQUESTS) {
+        FS_WARN(FS_MOD_RESOLVER, "Background queue full, deferring %ls", normalized.c_str());
+        return false;
+    }
+
+    m_inFlight.insert(normalized);
+    m_queue.push_back(normalized);
+    m_queueCv.notify_one();
+    FS_TRACE(FS_MOD_RESOLVER, "Queued background size lookup: %ls", normalized.c_str());
+    return true;
+}
+
+void SizeResolver::notify_shell_item_changed(const std::wstring& path) {
+    if (path.empty()) {
+        return;
+    }
+
+    // Only notify the finished item. Sending UPDATEDIR here causes our own
+    // ChangeNotifier subscription to invalidate the newly cached result.
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, path.c_str(), nullptr);
+}
+
+void SizeResolver::worker_main() {
+    while (true) {
+        std::wstring path;
+
+        {
+            std::unique_lock<std::mutex> lock(m_queueMutex);
+            m_queueCv.wait(lock, [this]() { return m_stopWorker || !m_queue.empty(); });
+
+            if (m_stopWorker && m_queue.empty()) {
+                return;
+            }
+
+            path = std::move(m_queue.front());
+            m_queue.pop_front();
+        }
+
+        FS_TRACE(FS_MOD_RESOLVER, "Resolving size on background worker: %ls", path.c_str());
+        auto size = resolve_size(path);
+
+        {
+            std::lock_guard<std::mutex> lock(m_queueMutex);
+            m_inFlight.erase(path);
+            if (size.has_value()) {
+                m_recentFailures.erase(path);
+            } else {
+                m_recentFailures[path] = std::chrono::steady_clock::now();
+            }
+        }
+
+        notify_shell_item_changed(path);
+    }
 }
 
 // ============================================================================
@@ -267,13 +389,23 @@ bool SizeResolver::resolve_and_inject(void* pCFSFolder, const ITEMID_CHILD* pidl
         fs::log::diagnostic_logf("resolve_and_inject #%d: path=%ls", call_num, pathOpt.value().c_str());
     }
 
-    // Resolve folder size
-    auto sizeOpt = resolve_size(pathOpt.value());
+    // Fast path only: avoid provider I/O on the Explorer thread.
+    auto sizeOpt = get_cached_size(pathOpt.value());
     if (!sizeOpt.has_value()) {
-        if (call_num <= 10) {
-            fs::log::diagnostic_logf("resolve_and_inject #%d: resolve_size returned nullopt", call_num);
+        if (!queue_background_resolution(pathOpt.value())) {
+            if (call_num <= 10) {
+                fs::log::diagnostic_logf("resolve_and_inject #%d: cache miss, queue skipped", call_num);
+            }
+            return false;
         }
-        return false; // No size available — show blank
+
+        pv->vt = VT_UI8;
+        pv->uhVal.QuadPart = fs::kPendingSizeSentinel;
+        if (call_num <= 10) {
+            fs::log::diagnostic_logf("resolve_and_inject #%d: queued pending for %ls",
+                                     call_num, pathOpt.value().c_str());
+        }
+        return true;
     }
 
     // Inject into PROPVARIANT: VT_UI8 with folder size
@@ -300,13 +432,13 @@ HRESULT SizeResolver::format_size_display(REFPROPERTYKEY key, REFPROPVARIANT pro
         return E_FAIL; // Not our property — let original handle it
     }
 
-    // Only format if there's a value (VT_UI8)
+    // Only format if there's a numeric value (normal size or sentinel).
     if (propvar.vt != VT_UI8) {
-        return E_FAIL; // Empty or unexpected type — let original handle
+        return E_FAIL;
     }
 
     uint64_t bytes = propvar.uhVal.QuadPart;
-    std::wstring formatted = fs::format_size_for_column(bytes);
+    std::wstring formatted = fs::format_size_for_shell_column(bytes);
 
     // Allocate output with CoTaskMemAlloc (Explorer expects this allocator)
     size_t cbSize = (formatted.length() + 1) * sizeof(wchar_t);

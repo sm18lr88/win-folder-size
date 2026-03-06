@@ -127,4 +127,14 @@ TEST_F(SizeFormatterTest, FormatSizeForColumnIsShorterThanFormatSize) {
     EXPECT_LT(column.length(), full.length());
 }
 
+TEST_F(SizeFormatterTest, PendingSizeSentinelFormatsAsPending) {
+    EXPECT_TRUE(is_pending_size(kPendingSizeSentinel));
+    EXPECT_EQ(format_size_for_shell_column(kPendingSizeSentinel), L"Pending");
+}
+
+TEST_F(SizeFormatterTest, NonPendingSizeUsesNormalColumnFormatting) {
+    EXPECT_FALSE(is_pending_size(1024));
+    EXPECT_EQ(format_size_for_shell_column(1024), L"1 KB");
+}
+
 }  // namespace fs

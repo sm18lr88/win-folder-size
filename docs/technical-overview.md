@@ -14,7 +14,7 @@ FolderSize is a COM shell extension DLL registered with `regsvr32`. It installs 
 
 A background thread (`SHChangeNotifyRegister`) watches for filesystem changes and invalidates stale cache entries — including all ancestor directories — so sizes stay current after file operations.
 
-Folder sizes come from [Everything](https://www.voidtools.com/) via named pipe IPC (pre-indexed, sub-millisecond per query). For non-NTFS drives, a fallback recursive scanner runs with a 200 ms timeout. If Everything isn't running, folders show blank — same as stock Explorer.
+Folder sizes come from [Everything](https://www.voidtools.com/) via named pipe IPC (pre-indexed, sub-millisecond per query). For non-NTFS drives, a fallback recursive scanner runs off-thread with a short timeout. Cache misses are queued onto a bounded background worker so Explorer can return immediately; while a lookup is in flight, the Size column can show `Pending`. If Everything isn't running, folders eventually fall back to blank — same as stock Explorer.
 
 For a full breakdown of each hook target, symbol resolution strategy, and reversibility guarantees, see [`hook-targets.md`](hook-targets.md).
 
@@ -48,8 +48,8 @@ Everything changes that. Sizes come from a pre-built in-memory index via named p
 | Sub-millisecond queries | 77% |
 | Queries measured | 78 |
 | Peak throughput | ~600 queries/sec |
-| UI thread blocked | Never (worker thread) |
+| Explorer size hook blocked on provider I/O | Never |
 
-The LRU cache (50 MB, 5-min TTL) means repeat visits to the same folder are instant — no IPC at all. Cache entries are invalidated immediately when files change, so sizes never go stale.
+The LRU cache (50 MB, 5-min TTL) means repeat visits to the same folder are instant — no IPC at all. Cache misses are deduplicated and capped so opening a folder with thousands of heavy subfolders does not fan out into unbounded work. Cache entries are invalidated immediately when files change, so sizes never go stale.
 
 Microsoft's concern is legitimate for a naive implementation. This isn't one.

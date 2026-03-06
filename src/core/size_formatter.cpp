@@ -114,4 +114,16 @@ std::wstring format_size_for_column(uint64_t bytes) {
     return buffer;
 }
 
+bool is_pending_size(uint64_t bytes) {
+    return bytes == kPendingSizeSentinel;
+}
+
+std::wstring format_size_for_shell_column(uint64_t bytes) {
+    if (is_pending_size(bytes)) {
+        return L"Pending";
+    }
+
+    return format_size_for_column(bytes);
+}
+
 } // namespace fs

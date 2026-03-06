@@ -244,7 +244,7 @@ static HRESULT hooked_PSFormatNonAlloc_inner(REFPROPERTYKEY key, REFPROPVARIANT 
         }
 
         uint64_t bytes = propvar.uhVal.QuadPart;
-        std::wstring formatted = fs::format_size_for_column(bytes);
+        std::wstring formatted = fs::format_size_for_shell_column(bytes);
 
         // Copy into caller-supplied buffer; _TRUNCATE ensures null termination
         wcsncpy_s(pwszText, cchText, formatted.c_str(), _TRUNCATE);
