@@ -11,6 +11,9 @@ if not exist "%DLL_PATH%" (
     set "DLL_PATH=%~dp0..\build\foldersize.dll"
 )
 if not exist "%DLL_PATH%" (
+    set "DLL_PATH=%~dp0foldersize.dll"
+)
+if not exist "%DLL_PATH%" (
     echo ERROR: foldersize.dll not found. Build the project first.
     exit /b 1
 )
