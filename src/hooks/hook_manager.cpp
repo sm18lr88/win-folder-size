@@ -362,8 +362,10 @@ bool HookManager::install_hooks() {
 
         // ================================================================
         // Resolve target function addresses using RVA offsets
-        // RVAs verified via SymEnumSymbols on windows.storage.dll Build 26200.7840
-        // Prologue byte validation catches DLL version mismatches
+        // RVAs verified via SymEnumSymbols on windows.storage.dll Build 26100.7840
+        // Prologue byte validation catches DLL version mismatches; when any
+        // mismatch fires, DbgHelp re-resolves ALL symbols from the PDB so that
+        // a DLL update never leaves any hook pointing at a stale address.
         // ================================================================
         DWORD64 addr_GetSize = 0;
         DWORD64 addr_Prepare = 0;
@@ -376,9 +378,9 @@ bool HookManager::install_hooks() {
             unsigned char expected_prologue[8];  // all-zero = skip validation
         };
         RvaTarget targets[] = {
-            {"CFSFolder::_GetSize",               &addr_GetSize,  0x79100,  {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41}},
-            {"CRecursiveFolderOperation::Prepare", &addr_Prepare,  0x6008C, {0}},
-            {"CRecursiveFolderOperation::Do",      &addr_Do,       0x5F6D0, {0}},
+            {"CFSFolder::_GetSize",               &addr_GetSize,  0x790E0, {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41}},
+            {"CRecursiveFolderOperation::Prepare", &addr_Prepare,  0x6010C, {0x48, 0x8B, 0xC4, 0x48, 0x89, 0x58, 0x10, 0x48}},
+            {"CRecursiveFolderOperation::Do",      &addr_Do,       0x5F750, {0x48, 0x89, 0x5C, 0x24, 0x10, 0x48, 0x89, 0x74}},
         };
 
         bool all_resolved = true;
@@ -417,9 +419,12 @@ bool HookManager::install_hooks() {
                     GetModuleInformation(GetCurrentProcess(), storage_dll, &mod_info, sizeof(mod_info));
                     pSymLoadModuleEx(GetCurrentProcess(), nullptr, storage_path,
                                     nullptr, storage_base, mod_info.SizeOfImage, nullptr, 0);
-                    if (!addr_GetSize) resolve_symbol("CFSFolder::_GetSize", nullptr, storage_base, &addr_GetSize);
-                    if (!addr_Prepare) resolve_symbol("CRecursiveFolderOperation::Prepare", nullptr, storage_base, &addr_Prepare);
-                    if (!addr_Do) resolve_symbol("CRecursiveFolderOperation::Do", nullptr, storage_base, &addr_Do);
+                    // Re-resolve ALL symbols from the PDB — overwrite even the ones that
+                    // appeared to pass the prologue check, since a DLL shift can move every
+                    // function simultaneously while some prologues happen to match by chance.
+                    resolve_symbol("CFSFolder::_GetSize", nullptr, storage_base, &addr_GetSize);
+                    resolve_symbol("CRecursiveFolderOperation::Prepare", nullptr, storage_base, &addr_Prepare);
+                    resolve_symbol("CRecursiveFolderOperation::Do", nullptr, storage_base, &addr_Do);
                     pSymCleanup(GetCurrentProcess());
                 }
             }
@@ -437,6 +442,7 @@ bool HookManager::install_hooks() {
         HMODULE propsys_dll = GetModuleHandleW(L"propsys.dll");
         if (!propsys_dll) {
             FS_ERROR(FS_MOD_HOOK, "propsys.dll not loaded");
+            fs::log::diagnostic_log("Hook init aborted: propsys.dll not in process (non-Explorer host?)");
             // DbgHelp cleanup happens in fallback path only
             return;
         }
