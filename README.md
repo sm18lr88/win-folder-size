@@ -1,5 +1,8 @@
 # FolderSize
 
+*Not working. Do **NOT** use*
+
+
 Display folder sizes in Windows Explorer.
 
 <img width="500" alt="image" src="https://github.com/user-attachments/assets/5ec3452d-a6f3-438b-9677-b3fbc451919f" />
