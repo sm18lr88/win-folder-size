@@ -72,7 +72,7 @@ work when run from an extracted release folder next to `foldersize.dll`.
 ## Release Process
 
 Releases are built by GitHub Actions for transparency. Push a `v*` tag, such as
-`v0.2.3`, to trigger `.github/workflows/release.yml`. The workflow builds on
+`v0.2.4`, to trigger `.github/workflows/release.yml`. The workflow builds on
 `windows-latest`, runs the test suite, packages the release ZIP, uploads the ZIP
 and `.sha256` checksum as workflow artifacts, then attaches both files to the
 GitHub Release.
