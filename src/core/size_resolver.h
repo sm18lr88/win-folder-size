@@ -6,7 +6,6 @@
 #include <propkey.h>
 #include <string>
 #include <optional>
-#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -18,7 +17,7 @@
 namespace fs::core {
 
 // Central orchestrator: resolves folder sizes by querying providers
-// (cache → Everything → scanner) and injects them into Explorer's property pipeline.
+// (fresh cache -> direct scanner) and injects them into Explorer's property pipeline.
 class SizeResolver {
 public:
     static SizeResolver& instance();
@@ -45,14 +44,15 @@ private:
     // Extract filesystem path from CFSFolder + child PIDL via COM interfaces
     std::optional<std::wstring> extract_path(void* pCFSFolder, const ITEMID_CHILD* pidlChild);
 
-    // Resolve folder size on the background worker: cache → Everything (NTFS) → scanner.
-    std::optional<uint64_t> resolve_size(const std::wstring& path);
+    // Resolve folder size on the background worker: fresh cache -> direct scanner.
+    std::optional<uint64_t> resolve_size(const std::wstring& path, bool forceRefresh = false);
 
     // Fast path for the Explorer hook: cache lookup only, no provider I/O.
     std::optional<uint64_t> get_cached_size(const std::wstring& path);
 
     // Queue a background lookup if one is not already in flight.
-    bool queue_background_resolution(const std::wstring& path);
+    bool queue_background_resolution(const std::wstring& path, bool forceRefresh = false);
+    void queue_refresh_if_due(const std::wstring& path);
     void ensure_worker_started();
     void worker_main();
     static std::wstring normalize_request_path(std::wstring_view path);
@@ -62,25 +62,19 @@ private:
     // Returns nullopt if not a reparse point, resolution fails, or path unchanged.
     std::optional<std::wstring> resolve_real_path(const std::wstring& path);
 
-    // Everything availability backoff
-    bool should_try_everything();
-    void mark_everything_unavailable();
-
-    std::atomic<bool> m_everythingAvailable{true};
-    std::chrono::steady_clock::time_point m_lastEverythingRetry{};
-    std::mutex m_retryMutex;
-    static constexpr auto EVERYTHING_RETRY_INTERVAL = std::chrono::seconds(30);
-
     std::mutex m_queueMutex;
     std::condition_variable m_queueCv;
     std::deque<std::wstring> m_queue;
     std::unordered_set<std::wstring> m_inFlight;
+    std::unordered_set<std::wstring> m_forceRefresh;
     std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> m_recentFailures;
+    std::unordered_map<std::wstring, std::chrono::steady_clock::time_point> m_recentRefreshes;
     std::thread m_worker;
     bool m_stopWorker{false};
 
     static constexpr size_t MAX_PENDING_REQUESTS = 64;
     static constexpr auto FAILURE_RETRY_INTERVAL = std::chrono::seconds(15);
+    static constexpr auto VISIBLE_REFRESH_INTERVAL = std::chrono::seconds(2);
 };
 
 } // namespace fs::core

@@ -14,20 +14,38 @@ FolderScanner::~FolderScanner() {
     cancel_all();
 }
 
-uint64_t FolderScanner::scan_recursive(const std::wstring& path, const std::atomic<bool>& cancel_token) {
+std::shared_ptr<std::atomic<bool>> FolderScanner::create_cancel_token() {
+    auto cancel_token = std::make_shared<std::atomic<bool>>(false);
+    {
+        std::lock_guard<std::mutex> lock(m_mutex);
+        m_cancelTokens.push_back(cancel_token);
+    }
+    return cancel_token;
+}
+
+void FolderScanner::remove_cancel_token(const std::shared_ptr<std::atomic<bool>>& cancel_token) {
+    std::lock_guard<std::mutex> lock(m_mutex);
+    auto it = std::find(m_cancelTokens.begin(), m_cancelTokens.end(), cancel_token);
+    if (it != m_cancelTokens.end()) {
+        m_cancelTokens.erase(it);
+    }
+}
+
+FolderScanner::ScanResult FolderScanner::scan_recursive(const std::wstring& path, const std::atomic<bool>& cancel_token) {
     if (cancel_token.load()) {
-        return 0;
+        return {0, ScanStatus::Cancelled};
     }
 
     uint64_t total_size = 0;
     WIN32_FIND_DATAW find_data;
     HANDLE find_handle = INVALID_HANDLE_VALUE;
 
-    // Build search pattern: path + \*
-    std::wstring search_pattern = path;
-    if (!search_pattern.empty() && search_pattern.back() != L'\\') {
-        search_pattern += L'\\';
+    std::wstring directory_prefix = path;
+    if (!directory_prefix.empty() && directory_prefix.back() != L'\\') {
+        directory_prefix += L'\\';
     }
+
+    std::wstring search_pattern = directory_prefix;
     search_pattern += L'*';
 
     FS_TRACE(FS_MOD_SCANNER, "Scanning directory: %ls", path.c_str());
@@ -49,14 +67,14 @@ uint64_t FolderScanner::scan_recursive(const std::wstring& path, const std::atom
         } else {
             FS_ERROR(FS_MOD_SCANNER, "Failed to open directory %ls (error: %lu)", path.c_str(), error);
         }
-        return 0;
+        return {0, ScanStatus::Incomplete};
     }
 
     do {
         // Check cancellation token between entries
         if (cancel_token.load()) {
             FindClose(find_handle);
-            return total_size;
+            return {total_size, ScanStatus::Cancelled};
         }
 
         // Skip . and ..
@@ -70,17 +88,18 @@ uint64_t FolderScanner::scan_recursive(const std::wstring& path, const std::atom
             continue;
         }
 
-        std::wstring full_path = path;
-        if (!full_path.empty() && full_path.back() != L'\\') {
-            full_path += L'\\';
-        }
+        std::wstring full_path = directory_prefix;
         full_path += find_data.cFileName;
 
         if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
             // Recurse into subdirectory
-            uint64_t subdir_size = scan_recursive(full_path, cancel_token);
-            total_size += subdir_size;
-            FS_TRACE(FS_MOD_SCANNER, "Subdir %ls: %llu bytes", find_data.cFileName, subdir_size);
+            ScanResult subdir_result = scan_recursive(full_path, cancel_token);
+            total_size += subdir_result.size;
+            FS_TRACE(FS_MOD_SCANNER, "Subdir %ls: %llu bytes", find_data.cFileName, subdir_result.size);
+            if (!subdir_result.completed()) {
+                FindClose(find_handle);
+                return {total_size, subdir_result.status};
+            }
         } else {
             // Accumulate file size
             uint64_t file_size = (static_cast<uint64_t>(find_data.nFileSizeHigh) << 32) | find_data.nFileSizeLow;
@@ -90,47 +109,50 @@ uint64_t FolderScanner::scan_recursive(const std::wstring& path, const std::atom
 
     } while (FindNextFileW(find_handle, &find_data));
 
+    DWORD find_next_error = GetLastError();
     FindClose(find_handle);
 
+    if (find_next_error != ERROR_NO_MORE_FILES) {
+        FS_ERROR(FS_MOD_SCANNER, "Directory enumeration failed for %ls (error: %lu)", path.c_str(), find_next_error);
+        return {total_size, ScanStatus::Incomplete};
+    }
+
     FS_DEBUG(FS_MOD_SCANNER, "Scan complete for %ls: %llu bytes", path.c_str(), total_size);
-    return total_size;
+    return {total_size, ScanStatus::Complete};
+}
+
+std::future<FolderScanner::ScanResult> FolderScanner::scan_async_result(std::wstring_view path) {
+    auto cancel_token = create_cancel_token();
+
+    return std::async(std::launch::async, [this, path_str = std::wstring(path), cancel_token]() -> ScanResult {
+        FS_DEBUG(FS_MOD_SCANNER, "Starting async scan: %ls", path_str.c_str());
+        FS_SCOPED_TIMER(FS_MOD_SCANNER, "scan_async");
+
+        ScanResult result = scan_recursive(path_str, *cancel_token);
+        remove_cancel_token(cancel_token);
+        return result;
+    });
 }
 
 std::future<std::optional<uint64_t>> FolderScanner::scan_async(std::wstring_view path) {
-    // Create a shared cancel token
-    auto cancel_token = std::make_shared<std::atomic<bool>>(false);
+    auto cancel_token = create_cancel_token();
 
-    // Store it for potential cancellation
-    {
-        std::lock_guard<std::mutex> lock(m_mutex);
-        m_cancelTokens.push_back(cancel_token);
-    }
-
-    // Launch async scan
-    auto future = std::async(std::launch::async, [this, path_str = std::wstring(path), cancel_token]() -> std::optional<uint64_t> {
+    return std::async(std::launch::async, [this, path_str = std::wstring(path), cancel_token]() -> std::optional<uint64_t> {
         FS_DEBUG(FS_MOD_SCANNER, "Starting async scan: %ls", path_str.c_str());
-        
         FS_SCOPED_TIMER(FS_MOD_SCANNER, "scan_async");
-        
-        uint64_t result = scan_recursive(path_str, *cancel_token);
-        
-        // Clean up the cancel token from the vector
-        {
-            std::lock_guard<std::mutex> lock(m_mutex);
-            auto it = std::find(m_cancelTokens.begin(), m_cancelTokens.end(), cancel_token);
-            if (it != m_cancelTokens.end()) {
-                m_cancelTokens.erase(it);
-            }
+
+        ScanResult result = scan_recursive(path_str, *cancel_token);
+        remove_cancel_token(cancel_token);
+        if (!result.completed()) {
+            return std::nullopt;
         }
 
-        return result;
+        return result.size;
     });
-
-    return future;
 }
 
-std::optional<uint64_t> FolderScanner::scan_sync(std::wstring_view path, std::chrono::milliseconds timeout) {
-    auto future = scan_async(path);
+FolderScanner::ScanResult FolderScanner::scan_sync_result(std::wstring_view path, std::chrono::milliseconds timeout) {
+    auto future = scan_async_result(path);
 
     // Wait for the result with timeout
     auto status = future.wait_for(timeout);
@@ -138,7 +160,7 @@ std::optional<uint64_t> FolderScanner::scan_sync(std::wstring_view path, std::ch
     if (status == std::future_status::timeout) {
         FS_WARN(FS_MOD_SCANNER, "Scan timeout for path: %ls", path.data());
         cancel_all();
-        return std::nullopt;
+        return {0, ScanStatus::Cancelled};
     }
 
     // Get the result
@@ -146,8 +168,17 @@ std::optional<uint64_t> FolderScanner::scan_sync(std::wstring_view path, std::ch
         return future.get();
     } catch (const std::exception& e) {
         FS_ERROR(FS_MOD_SCANNER, "Scan exception: %s", e.what());
+        return {0, ScanStatus::Incomplete};
+    }
+}
+
+std::optional<uint64_t> FolderScanner::scan_sync(std::wstring_view path, std::chrono::milliseconds timeout) {
+    ScanResult result = scan_sync_result(path, timeout);
+    if (!result.completed()) {
         return std::nullopt;
     }
+
+    return result.size;
 }
 
 void FolderScanner::cancel_all() {

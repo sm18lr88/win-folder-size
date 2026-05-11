@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#define FS_SIZE_CACHE_TESTING
 #include "core/size_cache.h"
 #include <thread>
 #include <vector>
@@ -217,6 +218,25 @@ TEST_F(SizeCacheTest, IsFreshNonExistentPath) {
     
     // Non-existent path is not fresh
     EXPECT_FALSE(cache.is_fresh(L"C:\\nonexistent\\path"));
+}
+
+TEST_F(SizeCacheTest, ExpiredEntryIsNotFresh) {
+    SizeCache& cache = SizeCache::instance();
+
+    cache.put(L"C:\\test\\path", 1024);
+    cache.force_expired_for_test(L"C:\\test\\path");
+
+    EXPECT_FALSE(cache.is_fresh(L"C:\\test\\path"));
+}
+
+TEST_F(SizeCacheTest, ExpiredEntryIsMissAndRemoved) {
+    SizeCache& cache = SizeCache::instance();
+
+    cache.put(L"C:\\test\\path", 1024);
+    cache.force_expired_for_test(L"C:\\test\\path");
+
+    EXPECT_FALSE(cache.get(L"C:\\test\\path").has_value());
+    EXPECT_EQ(cache.entry_count(), 0);
 }
 
 // ============================================================================

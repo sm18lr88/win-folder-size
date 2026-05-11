@@ -86,9 +86,11 @@ find_package(GTest CONFIG REQUIRED)
 add_executable(foldersize_tests
     tests/test_size_formatter.cpp
     tests/test_size_cache.cpp
+    tests/test_folder_scanner.cpp
     src/core/size_formatter.cpp
     src/core/size_cache.cpp
     src/core/logging.cpp
+    src/providers/folder_scanner.cpp
 )
 
 target_include_directories(foldersize_tests PRIVATE

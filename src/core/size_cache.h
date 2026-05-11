@@ -4,6 +4,7 @@
 #include <string>
 #include <optional>
 #include <chrono>
+#include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
 #include <string_view>
@@ -35,6 +36,18 @@ public:
     
     // Check if entry exists and is not stale
     bool is_fresh(std::wstring_view path) const;
+
+#ifdef FS_SIZE_CACHE_TESTING
+    void force_expired_for_test(std::wstring_view path) {
+        std::unique_lock<std::shared_mutex> lock(m_mutex);
+
+        std::wstring normalized = normalize_path(path);
+        auto it = m_cache.find(normalized);
+        if (it != m_cache.end()) {
+            it->second.timestamp = std::chrono::steady_clock::now() - TTL - std::chrono::seconds(1);
+        }
+    }
+#endif
 
 private:
     SizeCache() = default;

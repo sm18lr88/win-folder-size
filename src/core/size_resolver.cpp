@@ -2,7 +2,6 @@
 #include "logging.h"
 #include "core/size_cache.h"
 #include "core/size_formatter.h"
-#include "providers/everything_client.h"
 #include "providers/folder_scanner.h"
 
 #include <windows.h>
@@ -146,14 +145,13 @@ void SizeResolver::ensure_worker_started() {
     m_worker = std::thread([this]() { worker_main(); });
 }
 
-bool SizeResolver::queue_background_resolution(const std::wstring& path) {
+bool SizeResolver::queue_background_resolution(const std::wstring& path, bool forceRefresh) {
     const std::wstring normalized = normalize_request_path(path);
     if (normalized.empty()) {
         return false;
     }
 
     std::lock_guard<std::mutex> lock(m_queueMutex);
-    ensure_worker_started();
 
     auto now = std::chrono::steady_clock::now();
     auto failureIt = m_recentFailures.find(normalized);
@@ -166,6 +164,9 @@ bool SizeResolver::queue_background_resolution(const std::wstring& path) {
     }
 
     if (m_inFlight.contains(normalized)) {
+        if (forceRefresh) {
+            m_forceRefresh.insert(normalized);
+        }
         return true;
     }
 
@@ -174,11 +175,46 @@ bool SizeResolver::queue_background_resolution(const std::wstring& path) {
         return false;
     }
 
+    ensure_worker_started();
     m_inFlight.insert(normalized);
+    if (forceRefresh) {
+        m_forceRefresh.insert(normalized);
+    }
     m_queue.push_back(normalized);
     m_queueCv.notify_one();
     FS_TRACE(FS_MOD_RESOLVER, "Queued background size lookup: %ls", normalized.c_str());
     return true;
+}
+
+void SizeResolver::queue_refresh_if_due(const std::wstring& path) {
+    const std::wstring normalized = normalize_request_path(path);
+    if (normalized.empty()) {
+        return;
+    }
+
+    auto now = std::chrono::steady_clock::now();
+
+    {
+        std::lock_guard<std::mutex> lock(m_queueMutex);
+
+        for (auto it = m_recentRefreshes.begin(); it != m_recentRefreshes.end();) {
+            if (now - it->second > std::chrono::minutes(1)) {
+                it = m_recentRefreshes.erase(it);
+            } else {
+                ++it;
+            }
+        }
+
+        auto refreshIt = m_recentRefreshes.find(normalized);
+        if (refreshIt != m_recentRefreshes.end() &&
+            now - refreshIt->second < VISIBLE_REFRESH_INTERVAL) {
+            return;
+        }
+
+        m_recentRefreshes[normalized] = now;
+    }
+
+    queue_background_resolution(normalized, true);
 }
 
 void SizeResolver::notify_shell_item_changed(const std::wstring& path) {
@@ -186,8 +222,8 @@ void SizeResolver::notify_shell_item_changed(const std::wstring& path) {
         return;
     }
 
-    // Only notify the finished item. Sending UPDATEDIR here causes our own
-    // ChangeNotifier subscription to invalidate the newly cached result.
+    // Only notify the finished item. ChangeNotifier ignores directory UPDATEITEM
+    // notifications so the freshly cached result is not invalidated by our own refresh.
     SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSH, path.c_str(), nullptr);
 }
 
@@ -205,13 +241,15 @@ void SizeResolver::worker_main() {
 
             path = std::move(m_queue.front());
             m_queue.pop_front();
-        }
+            bool forceRefresh = m_forceRefresh.erase(path) > 0;
 
-        FS_TRACE(FS_MOD_RESOLVER, "Resolving size on background worker: %ls", path.c_str());
-        auto size = resolve_size(path);
+            lock.unlock();
 
-        {
-            std::lock_guard<std::mutex> lock(m_queueMutex);
+            FS_TRACE(FS_MOD_RESOLVER, "Resolving size on background worker: %ls", path.c_str());
+            auto size = resolve_size(path, forceRefresh);
+
+            lock.lock();
+
             m_inFlight.erase(path);
             if (size.has_value()) {
                 m_recentFailures.erase(path);
@@ -222,35 +260,6 @@ void SizeResolver::worker_main() {
 
         notify_shell_item_changed(path);
     }
-}
-
-// ============================================================================
-// Everything Availability Backoff
-// ============================================================================
-
-bool SizeResolver::should_try_everything() {
-    if (m_everythingAvailable.load(std::memory_order_relaxed)) {
-        return true;
-    }
-
-    // Check if backoff period has elapsed
-    auto now = std::chrono::steady_clock::now();
-    std::lock_guard<std::mutex> lock(m_retryMutex);
-    if (now - m_lastEverythingRetry >= EVERYTHING_RETRY_INTERVAL) {
-        m_everythingAvailable.store(true, std::memory_order_relaxed);
-        FS_DEBUG(FS_MOD_RESOLVER, "Everything backoff expired, will retry");
-        return true;
-    }
-
-    return false;
-}
-
-void SizeResolver::mark_everything_unavailable() {
-    std::lock_guard<std::mutex> lock(m_retryMutex);
-    m_everythingAvailable.store(false, std::memory_order_relaxed);
-    m_lastEverythingRetry = std::chrono::steady_clock::now();
-    FS_WARN(FS_MOD_RESOLVER, "Everything marked unavailable, backoff %lld seconds",
-            static_cast<long long>(EVERYTHING_RETRY_INTERVAL.count()));
 }
 
 // ============================================================================
@@ -287,25 +296,23 @@ std::optional<std::wstring> SizeResolver::resolve_real_path(const std::wstring& 
 }
 
 // ============================================================================
-// Size Resolution Pipeline: Cache → Everything (NTFS) → Scanner (non-NTFS)
-// Reparse points are resolved before querying Everything so that junctions
-// and symlinks map to a path that Everything has indexed.
+// Size Resolution Pipeline: Fresh cache -> authoritative direct scanner
+// Reparse points are resolved before scanning so junction/symlink requests use
+// the same filesystem target while cache entries remain under the original path.
 // ============================================================================
 
-std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path) {
+std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path, bool forceRefresh) {
     FS_SCOPED_TIMER(FS_MOD_RESOLVER, "resolve_size");
 
-    // 1. Cache check (fast path — sub-microsecond for hits)
-    auto cached = fs::SizeCache::instance().get(path);
-    if (cached.has_value()) {
-        FS_TRACE(FS_MOD_RESOLVER, "Cache hit: %ls = %llu bytes", path.c_str(),
-                 cached.value());
-        return cached;
+    if (!forceRefresh) {
+        auto cached = fs::SizeCache::instance().get(path);
+        if (cached.has_value()) {
+            FS_TRACE(FS_MOD_RESOLVER, "Cache hit: %ls = %llu bytes", path.c_str(),
+                     cached.value());
+            return cached;
+        }
     }
 
-    // 2. If the path is a reparse point (junction / symlink), resolve it so
-    //    Everything can find the real directory.  Skip UNC paths — resolution
-    //    can be slow for unmapped network shares.
     std::wstring effectivePath = path;
     if (!path.starts_with(L"\\\\")) {
         WIN32_FILE_ATTRIBUTE_DATA fad = {};
@@ -320,51 +327,22 @@ std::optional<uint64_t> SizeResolver::resolve_size(const std::wstring& path) {
         }
     }
 
-    // 3. Determine drive filesystem type (use effectivePath's drive)
-    wchar_t driveLetter = L'\0';
-    if (effectivePath.length() >= 2 && effectivePath[1] == L':') {
-        driveLetter = towupper(effectivePath[0]);
-    }
-
-    if (driveLetter == L'\0') {
-        FS_TRACE(FS_MOD_RESOLVER, "No drive letter in path: %ls", effectivePath.c_str());
-        return std::nullopt; // UNC paths, etc. — not supported
-    }
-
-    bool ntfs = fs::providers::FolderScanner::is_ntfs(driveLetter);
-
-    if (ntfs) {
-        // 4a. NTFS → Everything (pre-indexed, ~3ms per query)
-        if (!should_try_everything()) {
-            FS_TRACE(FS_MOD_RESOLVER, "Everything in backoff, skipping: %ls", path.c_str());
-            return std::nullopt;
-        }
-
-        auto size = fs::EverythingClient::instance().get_folder_size(effectivePath);
-        if (size.has_value()) {
-            fs::SizeCache::instance().put(path, size.value()); // cache under original path
-            FS_TRACE(FS_MOD_RESOLVER, "Everything: %ls = %llu bytes", path.c_str(),
-                     size.value());
-            return size;
-        }
-
-        // Everything failed — enter backoff, show blank for NTFS
-        mark_everything_unavailable();
-        return std::nullopt;
-    } else {
-        // 4b. Non-NTFS → recursive scanner (200ms timeout)
-        auto size = fs::providers::FolderScanner::instance().scan_sync(
-            effectivePath, std::chrono::milliseconds(200));
-        if (size.has_value()) {
-            fs::SizeCache::instance().put(path, size.value());
-            FS_TRACE(FS_MOD_RESOLVER, "Scanner: %ls = %llu bytes", path.c_str(),
-                     size.value());
-            return size;
-        }
-
-        FS_TRACE(FS_MOD_RESOLVER, "Scanner timeout/fail: %ls", path.c_str());
+    if (effectivePath.length() < 2 || effectivePath[1] != L':') {
+        FS_TRACE(FS_MOD_RESOLVER, "No local drive letter in path: %ls", effectivePath.c_str());
         return std::nullopt;
     }
+
+    auto result = fs::providers::FolderScanner::instance()
+                      .scan_async_result(effectivePath)
+                      .get();
+    if (!result.completed()) {
+        FS_TRACE(FS_MOD_RESOLVER, "Scanner incomplete/cancelled: %ls", path.c_str());
+        return std::nullopt;
+    }
+
+    fs::SizeCache::instance().put(path, result.size);
+    FS_TRACE(FS_MOD_RESOLVER, "Scanner: %ls = %llu bytes", path.c_str(), result.size);
+    return result.size;
 }
 
 // ============================================================================
@@ -411,6 +389,7 @@ bool SizeResolver::resolve_and_inject(void* pCFSFolder, const ITEMID_CHILD* pidl
     // Inject into PROPVARIANT: VT_UI8 with folder size
     pv->vt = VT_UI8;
     pv->uhVal.QuadPart = sizeOpt.value();
+    queue_refresh_if_due(pathOpt.value());
     if (call_num <= 10) {
         fs::log::diagnostic_logf("resolve_and_inject #%d: INJECTED %llu bytes for %ls",
                                  call_num, sizeOpt.value(), pathOpt.value().c_str());

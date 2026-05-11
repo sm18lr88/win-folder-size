@@ -52,7 +52,8 @@ std::optional<uint64_t> SizeCache::get(std::wstring_view path) {
     // Check if expired
     if (now - entry.timestamp > TTL) {
         FS_TRACE(FS_MOD_CACHE, "Cache entry expired for path");
-        return entry.size; // Return value but log as stale
+        m_cache.erase(it);
+        return std::nullopt;
     }
     
     // Update last_access timestamp

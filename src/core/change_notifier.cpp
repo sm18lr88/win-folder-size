@@ -6,6 +6,7 @@
 #include <shlobj.h>
 #include <string>
 #include <atomic>
+#include <vector>
 
 // Window-class name for the hidden notification window.
 static constexpr wchar_t kWndClass[] = L"FolderSizeChangeNotifier";
@@ -18,6 +19,28 @@ static constexpr UINT kNotifyMsg = WM_APP + 1;
 extern HINSTANCE GetDllInstance() noexcept;
 
 namespace fs::core {
+
+namespace {
+
+bool is_drive_root(const std::wstring& path) {
+    return path.size() == 3 && path[1] == L':' && path[2] == L'\\';
+}
+
+bool path_is_existing_directory(const std::wstring& path) {
+    DWORD attrs = GetFileAttributesW(path.c_str());
+    return attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+void notify_folder_item_changed(const std::wstring& path) {
+    if (path.empty() || is_drive_root(path)) {
+        return;
+    }
+
+    SHChangeNotify(SHCNE_UPDATEITEM, SHCNF_PATHW | SHCNF_FLUSHNOWAIT,
+                   path.c_str(), nullptr);
+}
+
+} // namespace
 
 // ============================================================================
 // Singleton
@@ -39,9 +62,15 @@ void ChangeNotifier::invalidate_path_and_ancestors(const std::wstring& path) {
     // Strip trailing backslash (but keep "C:\")
     while (p.size() > 3 && p.back() == L'\\') p.pop_back();
 
+    std::vector<std::wstring> foldersToNotify;
+
     while (!p.empty()) {
         fs::SizeCache::instance().invalidate(p);
         FS_TRACE("NOTIFIER", "Invalidated cache: %ls", p.c_str());
+
+        if (path_is_existing_directory(p) && !is_drive_root(p)) {
+            foldersToNotify.push_back(p);
+        }
 
         size_t lastSep = p.rfind(L'\\');
         if (lastSep == std::wstring::npos) break;
@@ -54,6 +83,10 @@ void ChangeNotifier::invalidate_path_and_ancestors(const std::wstring& path) {
             break;
         }
         p = p.substr(0, lastSep);
+    }
+
+    for (const auto& folder : foldersToNotify) {
+        notify_folder_item_changed(folder);
     }
 }
 
@@ -103,8 +136,10 @@ DWORD WINAPI ChangeNotifier::thread_proc(LPVOID pParam) {
 
     ULONG ulRegID = SHChangeNotifyRegister(
         hwnd,
-        SHCNRF_ShellLevel | SHCNRF_NewDelivery,
+        SHCNRF_ShellLevel | SHCNRF_InterruptLevel |
+            SHCNRF_RecursiveInterrupt | SHCNRF_NewDelivery,
         SHCNE_UPDATEDIR  |
+        SHCNE_UPDATEITEM |
         SHCNE_RMDIR      |
         SHCNE_MKDIR      |
         SHCNE_CREATE     |
@@ -155,8 +190,12 @@ DWORD WINAPI ChangeNotifier::thread_proc(LPVOID pParam) {
                     // ppidls[0] = affected path, ppidls[1] = new path (for renames)
                     wchar_t path[MAX_PATH] = {};
                     if (ppidls[0] && SHGetPathFromIDListW(ppidls[0], path) && path[0]) {
-                        invalidate_path_and_ancestors(path);
-                        FS_DEBUG("NOTIFIER", "Shell event 0x%lx: %ls", lEvent, path);
+                        if (lEvent == SHCNE_UPDATEITEM && path_is_existing_directory(path)) {
+                            FS_TRACE("NOTIFIER", "Ignored directory update notification: %ls", path);
+                        } else {
+                            invalidate_path_and_ancestors(path);
+                            FS_DEBUG("NOTIFIER", "Shell event 0x%lx: %ls", lEvent, path);
+                        }
                     }
                     // For renames, also invalidate the new name
                     if ((lEvent & (SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER)) && ppidls[1]) {
