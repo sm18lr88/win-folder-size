@@ -89,6 +89,32 @@ jobs:
           Get-ChildItem $staging
         shell: pwsh
 
+      - name: Prepare release notes
+        run: |
+          $tag = "${{ github.ref_name }}"
+          $notesPath = "docs\release-notes\$tag.md"
+          if (Test-Path $notesPath) {
+            Copy-Item $notesPath "RELEASE_NOTES.md"
+          } else {
+            @"
+            ## Summary
+
+            FolderSize $tag was built and tested by GitHub Actions.
+
+            ## Artifact
+
+            - `foldersize-$tag-win64.zip`
+            - `foldersize-$tag-win64.zip.sha256`
+
+            ## Provenance
+
+            - Commit: ${{ github.sha }}
+            - Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+            "@ | Set-Content -Path "RELEASE_NOTES.md" -Encoding UTF8
+          }
+          Get-Content "RELEASE_NOTES.md"
+        shell: pwsh
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
@@ -105,4 +131,4 @@ jobs:
           files: |
             ${{ env.RELEASE_ZIP }}
             ${{ env.RELEASE_SHA256 }}
-          generate_release_notes: true
+          body_path: RELEASE_NOTES.md
