@@ -8,6 +8,9 @@ if not exist "%DLL_PATH%" (
     set "DLL_PATH=%~dp0..\build\Debug\foldersize.dll"
 )
 if not exist "%DLL_PATH%" (
+    set "DLL_PATH=%~dp0foldersize.dll"
+)
+if not exist "%DLL_PATH%" (
     set "DLL_PATH=%~dp0..\build\foldersize.dll"
 )
 if not exist "%DLL_PATH%" (
@@ -27,6 +30,6 @@ timeout /t 2 /nobreak >nul
 start "" explorer.exe
 
 echo.
-echo Done. Folder sizes will appear in Explorer's Size column.
-echo Requires Everything (voidtools.com) running with folder size indexing enabled.
+echo Done. Folder sizes will appear in Explorer's Size column after background scans complete.
+echo Everything is optional and is not required for folder-size correctness.
 endlocal

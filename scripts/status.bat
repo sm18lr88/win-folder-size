@@ -29,7 +29,7 @@ if %errorlevel% equ 0 (
     echo [RUNNING] Everything.exe is running
 ) else (
     echo [NOT RUNNING] Everything.exe is not running
-    echo WARNING: Folder sizes require Everything to be running
+    echo INFO: Everything is optional and is not required for folder-size correctness
 )
 
 echo.

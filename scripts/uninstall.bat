@@ -8,6 +8,9 @@ if not exist "%DLL_PATH%" (
     set "DLL_PATH=%~dp0..\build\Debug\foldersize.dll"
 )
 if not exist "%DLL_PATH%" (
+    set "DLL_PATH=%~dp0foldersize.dll"
+)
+if not exist "%DLL_PATH%" (
     set "DLL_PATH=%~dp0..\build\foldersize.dll"
 )
 if not exist "%DLL_PATH%" (
