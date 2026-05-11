@@ -10,21 +10,23 @@ Display folder sizes in Windows Explorer.
 
 **Runtime**
 - Windows 10/11 x64
+- Microsoft Visual C++ runtime, if it is not already installed on the machine
 
 **Optional**
 - [Everything](https://www.voidtools.com/) 1.5a may be reported by diagnostics, but folder-size correctness doesn't depend on it.
 
 **Build**
-- Visual Studio 2022+ (MSVC)
+- MSVC with C++20 support
+- The bundled `scripts\build.bat` currently expects Visual Studio 18 / 2026 Enterprise or Build Tools
 - CMake 3.20+
-- vcpkg with `VCPKG_ROOT` set
+- vcpkg
 
 ## Quick Install
 
 1. Download `foldersize-vX.X.X-win64.zip` from [Releases](../../releases)
 2. Extract and run `install.bat` **as Administrator**
 3. Folder sizes appear after the background scanner completes each folder
-4. Run `status.bat` **as Administrator** to confirm registration and Explorer loading
+4. Optionally run `status.bat` to confirm registration and Explorer loading
 
 ## Building from Source
 
@@ -39,7 +41,7 @@ Output: `build\Release\foldersize.dll` or `build\Debug\foldersize.dll`.
 
 ## Install / Uninstall
 
-All scripts require **Administrator** privileges.
+Install and uninstall require **Administrator** privileges. `status.bat` only reports registration, Explorer loading, and optional Everything status.
 
 ```batch
 scripts\install.bat        :: Register DLL + restart Explorer
@@ -47,7 +49,7 @@ scripts\uninstall.bat      :: Unregister + restart Explorer
 scripts\status.bat         :: Check COM registration and diagnostics
 ```
 
-Manual uninstall: `regsvr32 /u foldersize.dll`
+Manual uninstall from an extracted release folder: run Command Prompt as Administrator, then run `regsvr32 /u "%CD%\foldersize.dll"`.
 
 Release ZIPs are self-contained: `install.bat`, `uninstall.bat`, and `status.bat`
 work when run from an extracted release folder next to `foldersize.dll`.
@@ -60,19 +62,19 @@ work when run from an extracted release folder next to `foldersize.dll`.
 | Folder sizes in Tiles / Content / Details-pane / Status bar | ✓ | ✓ |
 | Reparse point / junction / symlink resolution | partial | ✓ |
 | `PSFormatForDisplay` (legacy dialogs) | ✓ | ✓ |
-| Cache invalidation on filesystem changes | ✗ | ✓ |
-| SEH protection on all hooks | ✗ | ✓ |
-| RAII recursive-op guard | ✗ | ✓ |
+| Proactive folder-size refresh after changes | TTL-based | ✓ |
+| SEH protection on extension hooks | Windhawk-managed | ✓ |
+| Recursive-operation guard | Basic guard | RAII scoped guard |
 | Fresh-only bounded LRU cache | ✗ | ✓ (50 MB, 5-min TTL) |
 | Loading mechanism | Windhawk service | `regsvr32` — standard COM |
 | Uninstallation | Requires Windhawk | `regsvr32 /u` |
-| Extension footprint | Windhawk mod | Single DLL, 144 KB |
-| External runtime dependency | Windhawk | None beyond Windows Explorer |
+| Extension footprint | Windhawk mod | Single DLL, about 170 KB |
+| External runtime dependency | Windhawk | Windows Explorer plus VC++ runtime |
 
 ## Release Process
 
 Releases are built by GitHub Actions for transparency. Push a `v*` tag, such as
-`v0.2.4`, to trigger `.github/workflows/release.yml`. The workflow builds on
+`v0.2.5`, to trigger `.github/workflows/release.yml`. The workflow builds on
 `windows-latest`, runs the test suite, packages the release ZIP, uploads the ZIP
 and `.sha256` checksum as workflow artifacts, then attaches both files to the
 GitHub Release.
@@ -87,7 +89,7 @@ This project was inspired by m417z's excellent [Better file sizes in Explorer de
 
 ## Technical Details
 
-For how the hooks work, architecture, and performance benchmarks, see [`docs/technical-overview.md`](docs/technical-overview.md). For release steps, see [`docs/release.md`](docs/release.md).
+For how the hooks work, architecture, and performance considerations, see [`docs/technical-overview.md`](docs/technical-overview.md). For release steps, see [`docs/release.md`](docs/release.md).
 
 ## License
 

@@ -9,7 +9,7 @@ Before tagging a release, make sure these versions match:
 
 - `src/version.rc` `FILEVERSION`, `PRODUCTVERSION`, `FileVersion`, and `ProductVersion`
 - `vcpkg.json` `version`
-- the Git tag, for example `v0.2.4`
+- the Git tag, for example `v0.2.5`
 
 ## Build Artifact Contents
 
@@ -33,8 +33,8 @@ The workflow also publishes a `foldersize-<tag>-win64.zip.sha256` checksum.
 3. Create and push a tag:
 
    ```powershell
-   git tag v0.2.4
-   git push origin v0.2.4
+   git tag v0.2.5
+   git push origin v0.2.5
    ```
 
 4. The `Release` workflow builds and tests on `windows-latest`.
