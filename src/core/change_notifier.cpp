@@ -5,7 +5,6 @@
 #include <windows.h>
 #include <shlobj.h>
 #include <string>
-#include <atomic>
 #include <vector>
 
 // Window-class name for the hidden notification window.
