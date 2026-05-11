@@ -2,6 +2,8 @@
 build/
 out/
 cmake-build-*/
+dist/
+staging/
 
 # vcpkg dependencies (restored by running vcpkg install)
 vcpkg_installed/
@@ -43,6 +45,10 @@ ehthumbs.db
 # Debug and test output
 *.log
 Testing/
+
+# Local release packages generated outside GitHub Actions
+*.zip
+*.sha256
 
 # AI planning/orchestration files (not part of project source)
 .sisyphus/

@@ -2,7 +2,7 @@
 
 ## Summary
 
-Explorer's Size column is populated by internal functions in `windows.storage.dll`, resolved via PDB symbol names at runtime. For folders, the primary function returns `VT_EMPTY` (blank). We intercept this and inject the folder size from Everything.
+Explorer's Size column is populated by internal functions in `windows.storage.dll`, resolved via PDB symbol names at runtime. For folders, the primary function returns `VT_EMPTY` (blank). We intercept this and inject fresh completed sizes from the cache, or queue direct scanner work when no fresh size exists.
 
 **Total hooks: 6 (3 required, 3 recommended)**
 
@@ -41,8 +41,9 @@ HRESULT WINAPI CFSFolder_GetSize(
    a. QI `pCFSFolder` to `IShellFolder2` via `((IUnknown*)pCFSFolder)->QueryInterface(IID_IShellFolder2, ...)`.
    b. Use `IShellFolder2::BindToObject(itemidChild, nullptr, IID_IShellFolder2, &childFolder)` to get the child folder's shell interface.
    c. Extract the folder path via `IPersistFolder2` → `GetCurFolder()` → `SHGetPathFromIDListEx()`.
-   d. Query our `SizeCache` first. On cache miss, query `EverythingClient`.
-   e. Set `propVariant->vt = VT_UI8` and `propVariant->uhVal.QuadPart = folder_size`.
+   d. Query our fresh-only `SizeCache` first. On cache miss, queue direct scanner work.
+   e. If a completed size is available, set `propVariant->vt = VT_UI8` and `propVariant->uhVal.QuadPart = folder_size`.
+   f. For visible cached folders, queue a throttled background refresh so missed shell notifications do not leave the row stale until the cache TTL expires.
 4. If anything fails, return the original result (folder shows blank — fail-silent).
 
 ### Path Extraction
@@ -80,9 +81,9 @@ HRESULT __thiscall CRecursiveFolderOperation_Do(void* pThis);
 
 ### Why These Are Needed
 When Explorer performs file operations (copy, move, delete), it internally calls `CFSFolder::_GetSize` to compute total sizes for progress bars and confirmation dialogs. Without these guards:
-- Our hook would inject Everything sizes during copy/move/delete operations.
-- This would give **incorrect** results (Everything's index may not match actual files being operated on).
-- It would **slow down** file operations with unnecessary IPC calls to Everything.
+- Our hook would inject folder sizes during copy/move/delete operations.
+- This could give **incorrect** progress totals while Explorer is computing the actual files being operated on.
+- It would **slow down** file operations with unnecessary cache lookups or background work.
 
 ### Hook Strategy
 
@@ -205,11 +206,10 @@ SHCNE_DELETE | SHCNE_RENAMEITEM | SHCNE_RENAMEFOLDER` events for the
 entire shell namespace (desktop root, recursive).
 
 On each event: the affected path **and all ancestor directories** are
-invalidated from `SizeCache`, so re-navigating a parent folder shows
-fresh sizes immediately.
+invalidated from `SizeCache`, so re-navigating a parent folder can show
+fresh cached results or queue recomputation sooner.
 
-Without this thread, cached sizes are not invalidated on filesystem changes
-and stay stale until the TTL expires.
+Without this thread, filesystem changes are not invalidated early. Fresh cache entries can remain visible until the TTL expires, then they miss and recompute instead of being returned as completed stale values.
 
 ---
 
@@ -306,5 +306,6 @@ All hooks are installed via Microsoft Detours, which:
 | PDB symbols unavailable | Low | DLL is no-op (no sizes, no crash) | Graceful fallback chain |
 | Symbol names change in Windows update | Medium | DLL is no-op until updated | Log warning, user can check DebugView |
 | Explorer internal structure changes | Low-Medium | Hook signature mismatch → SEH catches | SEH wrapper returns original result |
-| Everything service not running | Low | Folders show blank (stock behavior) | Fail-silent, no error dialogs |
-| Slow Everything IPC | Low | Sizes delayed but no hang | 2-second timeout per query, cache mitigates |
+| Scanner incomplete or cancelled | Medium | Folder stays blank after in-flight work ends | Cache only completed scans |
+| Slow direct scan | Medium | Sizes delayed but no hang | Background worker, bounded queue, fresh cache |
+| Optional Everything IPC unavailable | Low | No correctness impact | Direct scanner remains the final size provider |

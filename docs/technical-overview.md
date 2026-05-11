@@ -6,15 +6,21 @@ FolderSize is a COM shell extension DLL registered with `regsvr32`. It installs 
 
 | Hook | Target | Purpose |
 |------|--------|---------|
-| `CFSFolder::_GetSize` | `windows.storage.dll` | Intercepts folder size queries; returns size from Everything |
+| `CFSFolder::_GetSize` | `windows.storage.dll` | Intercepts folder size queries and supplies completed scanner results |
 | `CRecursiveFolderOperation::Prepare/Do` | `windows.storage.dll` | RAII guard: suppresses size injection during copy/move/delete |
 | `PSFormatForDisplayAlloc` | `propsys.dll` | Human-readable formatting (B/KB/MB/GB/TB) instead of "1,572,864 KB" |
 | `PSFormatForDisplay` | `propsys.dll` | Same, for older Open/Save dialogs |
 | `RegQueryValueExW` | `kernelbase.dll` | Injects `System.Size` into Explorer's property format strings so sizes appear in Tiles, Content, Details-pane, and status-bar views |
 
-A background thread (`SHChangeNotifyRegister`) watches for filesystem changes and invalidates stale cache entries — including all ancestor directories — so sizes stay current after file operations.
+A background thread (`SHChangeNotifyRegister`) watches for filesystem changes and invalidates cache entries, including all ancestor directories. It also asks Explorer to re-query affected folder rows after invalidation so visible sizes update promptly after file operations.
 
-Folder sizes come from [Everything](https://www.voidtools.com/) via named pipe IPC (pre-indexed, sub-millisecond per query). For non-NTFS drives, a fallback recursive scanner runs off-thread with a short timeout. Cache misses are queued onto a bounded background worker so Explorer can return immediately; while a lookup is in flight, the Size column can show `Pending`. If Everything isn't running, folders eventually fall back to blank — same as stock Explorer.
+Final folder sizes come from direct filesystem scanning. The scanner runs off-thread, and only completed scans are cached or displayed as finished sizes. UNC and other unsupported paths stay blank rather than showing guessed totals. Access-denied or cancelled scans also stay blank after the in-flight work ends.
+
+The cache is fresh-only. `SizeCache::get()` returns a value only while it is inside the TTL; expired values are misses and must be recomputed. Change notifications are still useful because they invalidate affected folders and ancestors before the TTL expires, but correctness doesn't depend on receiving every notification.
+
+Cache misses are queued onto a bounded background worker so Explorer can return immediately. While a lookup is queued or running, the Size column can show `Pending`. `Pending` means background work is in progress. It is not a completed size, and it isn't cached as one. Visible cached folders are also refreshed periodically in the background so missed shell notifications do not leave Explorer stuck on stale sizes until the full cache TTL expires.
+
+[Everything](https://www.voidtools.com/) IPC code remains in the tree for diagnostics, legacy paths, or future acceleration work, but it is optional and not a source of final displayed sizes in the current correctness model.
 
 For a full breakdown of each hook target, symbol resolution strategy, and reversibility guarantees, see [`hook-targets.md`](hook-targets.md).
 
@@ -27,8 +33,8 @@ src/
   com/          # COM class factory, DLL exports
   core/         # Init, logging, size formatting, LRU cache, change notifier
   hooks/        # Detours wrapper, hook manager, RegQueryValueExW hook
-  providers/    # Everything IPC client, fallback folder scanner
-include/        # Shared headers (logging, GUIDs, Everything IPC types)
+  providers/    # Direct folder scanner, optional Everything IPC client
+include/        # Shared headers (logging, GUIDs, optional Everything IPC types)
 tests/          # GTest unit tests (formatter, cache)
 docs/           # Technical documentation
 ```
@@ -37,19 +43,12 @@ docs/           # Technical documentation
 
 ## Performance
 
-Microsoft's official position is that folder sizes in Explorer would hurt performance — which was true when they last evaluated it, because the only viable approach at the time was a recursive directory scan: blocking, O(files), disk I/O on the UI thread.
+Microsoft's official position is that folder sizes in Explorer would hurt performance, which was true for a naive recursive directory scan: blocking, O(files), disk I/O on the UI thread.
 
-Everything changes that. Sizes come from a pre-built in-memory index via named pipe IPC. Measured on a real session browsing `node_modules` directories with hundreds of packages:
+FolderSize avoids that UI-thread cost. The Explorer hook performs cache lookup and queues background work, while direct scanning runs off-thread. Large folders can still take time to scan, especially on slow disks or when Windows denies traversal, but Explorer shouldn't block on provider I/O.
 
-| Metric | Value |
-|--------|-------|
-| Average IPC round-trip | 0.6 ms |
-| Worst case | 4 ms |
-| Sub-millisecond queries | 77% |
-| Queries measured | 78 |
-| Peak throughput | ~600 queries/sec |
-| Explorer size hook blocked on provider I/O | Never |
+The previous Everything-backed path was optimized for indexed IPC, but that path is optional and doesn't supply final displayed sizes in this correctness model. The current provider favors correctness over guessed speed: completed direct scans can be shown, incomplete scans cannot.
 
-The LRU cache (50 MB, 5-min TTL) means repeat visits to the same folder are instant — no IPC at all. Cache misses are deduplicated and capped so opening a folder with thousands of heavy subfolders does not fan out into unbounded work. Cache entries are invalidated immediately when files change, so sizes never go stale.
+The LRU cache (50 MB, 5-min TTL) makes fresh repeat visits fast. Cache misses are deduplicated and capped so opening a folder with thousands of heavy subfolders doesn't fan out into unbounded work. Cache entries are invalidated when shell file-change notifications arrive, and expired entries are treated as misses if a notification is delayed or missed.
 
-Microsoft's concern is legitimate for a naive implementation. This isn't one.
+Microsoft's concern is legitimate for a naive implementation. FolderSize keeps recursive work off Explorer's hot path and treats blank or pending as safer than stale or partial completed sizes.

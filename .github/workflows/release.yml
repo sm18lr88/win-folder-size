@@ -4,6 +4,7 @@ on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -55,25 +56,53 @@ jobs:
 
       - name: Package release artifact
         run: |
-          $tag = "${{ github.ref_name }}"
+          if ("${{ github.ref_type }}" -eq "tag") {
+            $tag = "${{ github.ref_name }}"
+          } else {
+            $tag = "manual-${{ github.run_number }}"
+          }
           $zipName = "foldersize-$tag-win64.zip"
           $staging = "staging"
+          Remove-Item -Recurse -Force $staging -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           Copy-Item "build\Release\foldersize.dll" $staging
           Copy-Item "build\Release\foldersize.pdb" $staging
           Copy-Item "scripts\install.bat" $staging
           Copy-Item "scripts\uninstall.bat" $staging
           Copy-Item "scripts\status.bat" $staging
+          Copy-Item "docs" $staging -Recurse
           Copy-Item "README.md" $staging
           Copy-Item "LICENSE" $staging
+          @"
+          FolderSize $tag
+          Commit: ${{ github.sha }}
+          Build run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          Built by GitHub Actions on windows-latest.
+          "@ | Set-Content -Path "$staging\BUILD-INFO.txt" -Encoding UTF8
           Compress-Archive -Path "$staging\*" -DestinationPath $zipName -Force
+          $hash = Get-FileHash -Algorithm SHA256 $zipName
+          "$($hash.Hash)  $zipName" | Set-Content -Path "$zipName.sha256" -Encoding ASCII
           Write-Output "RELEASE_ZIP=$zipName" >> $env:GITHUB_ENV
+          Write-Output "RELEASE_SHA256=$zipName.sha256" >> $env:GITHUB_ENV
           Write-Output "Packaged: $zipName"
+          Get-Content "$zipName.sha256"
           Get-ChildItem $staging
         shell: pwsh
 
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.RELEASE_ZIP }}
+          path: |
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_SHA256 }}
+          if-no-files-found: error
+
       - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/')
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.RELEASE_ZIP }}
+          files: |
+            ${{ env.RELEASE_ZIP }}
+            ${{ env.RELEASE_SHA256 }}
           generate_release_notes: true
